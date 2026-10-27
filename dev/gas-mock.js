@@ -74,8 +74,11 @@ function makeSheet(name) {
 
 function makeSpreadsheet() {
   const sheets = [makeSheet('Sheet1')];
+  let title = 'Untitled spreadsheet';
   return {
     sheets,
+    getName: () => title,
+    rename: n => { title = n; },
     getSheetByName: n => sheets.find(s => s.name === n) || null,
     insertSheet: n => { const s = makeSheet(n); sheets.push(s); return s; },
     getSheets: () => sheets,

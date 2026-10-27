@@ -32,6 +32,7 @@ const CHUNK = 45000;
 
 function setup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!/^Inkwell/.test(ss.getName()) || /\)nkwell|Untitled/.test(ss.getName())) ss.rename('Inkwell Writing Studio (data)');
   Object.keys(SHEETS).forEach(function (name) {
     let sh = ss.getSheetByName(name);
     if (!sh) sh = ss.insertSheet(name);
