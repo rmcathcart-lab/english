@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inkwell · Student Writing</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect x='2' y='2' width='36' height='36' rx='10' fill='%238a2c37'/%3E%3Cpath d='M13 29c3-1 5-4 7-8l5-10c.6-1.3 2.4-.9 2.4.5 0 4-2.7 9.6-6.4 13.3-2.1 2.1-4.6 3.5-8 4.2Z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css?v=1">
+</head>
+<body>
+
+  <!-- Sign in -->
+  <section id="view-login" class="center-screen" hidden>
+    <div class="card login-card">
+      <div class="brand"><span data-icon="mark"></span>Inkwell</div>
+      <p class="lede">Sign in with the student code your teacher gave you.</p>
+      <form id="login-form" autocomplete="off">
+        <label class="sr-only" for="code">Student code</label>
+        <input id="code" class="input code-input" placeholder="MAPLE-27" maxlength="24" autocapitalize="characters" spellcheck="false" required>
+        <button class="btn primary lg" type="submit" id="login-btn">Sign in</button>
+        <div class="err" id="login-err"></div>
+      </form>
+      <div class="login-foot">Teacher? <a href="teacher.html">Open the dashboard</a></div>
+    </div>
+  </section>
+
+  <!-- Assignment list -->
+  <section id="view-home" hidden>
+    <header class="topbar">
+      <div class="brand"><span data-icon="mark"></span>Inkwell</div>
+      <div class="who">
+        <span><b id="who-name"></b> <span class="muted" id="who-class"></span></span>
+        <button class="btn sm" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+    <main class="wrap">
+      <h1 class="page-title" id="hello">Your assignments</h1>
+      <p class="page-sub">Assignments open during your class time. Your work saves automatically.</p>
+      <div class="assign-list" id="assign-list"></div>
+    </main>
+  </section>
+
+  <!-- Read-only view (submitted or closed) -->
+  <section id="view-read" hidden>
+    <header class="topbar">
+      <button class="btn sm" id="read-back">← Back to assignments</button>
+      <div class="muted small" id="read-meta"></div>
+    </header>
+    <div class="readonly-wrap">
+      <h1 class="page-title" id="read-title" style="margin: 10px 0 18px"></h1>
+      <div class="page"><div class="doc" id="read-doc"></div></div>
+    </div>
+  </section>
+
+  <!-- Writing mode -->
+  <section id="view-write" hidden>
+    <div class="w-top">
+      <div class="w-title"><span data-icon="mark"></span><span id="w-title"></span></div>
+      <div class="w-timer off" id="w-timer"><span data-icon="clock" style="display:inline-flex;width:16px"></span><span id="w-timer-text"></span></div>
+      <div class="w-actions">
+        <span class="savestate" id="savestate"><span class="dot"></span><span id="savestate-text">Saved</span></span>
+        <button class="btn sm" id="exit-btn" title="Save and leave this assignment"><span data-icon="door"></span>Save &amp; exit</button>
+        <button class="btn sm primary" id="submit-btn"><span data-icon="send"></span>Submit</button>
+      </div>
+    </div>
+    <div class="w-body" id="w-body">
+      <aside class="w-side">
+        <div id="prompt-wrap">
+          <h4>Prompt</h4>
+          <div class="prompt-box"><div class="doc" id="w-prompt"></div></div>
+        </div>
+        <div>
+          <h4>Progress</h4>
+          <div class="stats">
+            <div class="stat"><b id="st-words">0</b><span>words</span></div>
+            <div class="stat"><b id="st-chars">0</b><span>characters</span></div>
+          </div>
+          <div id="goal-wrap" hidden>
+            <div class="goal-bar" id="goal-bar"><i></i></div>
+            <div class="goal-text" id="goal-text"></div>
+          </div>
+          <div class="goal-text" id="st-chars-ns"></div>
+        </div>
+        <div>
+          <h4>Reminders</h4>
+          <ul class="rules-mini" style="padding-left:18px;margin:0">
+            <li>Stay in this window — leaving it locks the assignment.</li>
+            <li>Pasting from outside is turned off.</li>
+            <li>Press <b>Tab</b> to indent a paragraph.</li>
+            <li>Right-click a misspelled word for suggestions.</li>
+          </ul>
+        </div>
+      </aside>
+      <div class="w-main">
+        <div id="editor-host" style="display:contents"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Before starting -->
+  <div class="overlay" id="ov-start" hidden>
+    <div class="ov-card">
+      <div class="icon info-icon"><span data-icon="pen"></span></div>
+      <h2 id="start-title">Ready to write?</h2>
+      <p class="muted" id="start-sub"></p>
+      <ul class="rules">
+        <li><b>The page goes full screen.</b> Switching tabs or apps, exiting full screen, or closing the page will <b>lock you out</b> until your teacher clears you.</li>
+        <li><b>Pasting is turned off</b> for anything copied from outside this assignment.</li>
+        <li><b>Your work saves automatically</b> every few seconds.</li>
+        <li>Don't press <b>Esc</b> — it exits full screen.</li>
+      </ul>
+      <div class="row" style="justify-content:center">
+        <button class="btn" id="start-cancel">Not yet</button>
+        <button class="btn primary lg" id="start-go"><span data-icon="expand"></span><span id="start-go-text">Start writing</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Locked -->
+  <div class="overlay dark" id="ov-lock" hidden>
+    <div class="ov-card">
+      <div class="icon lock-icon"><span data-icon="lock"></span></div>
+      <h2>You're locked out</h2>
+      <div class="reason" id="lock-reason"></div>
+      <p>Your work is saved<span id="lock-words"></span>. Raise your hand — your teacher needs to clear you before you can keep writing.</p>
+      <div class="waiting" id="lock-waiting"><span class="spin"></span> Waiting for your teacher…</div>
+      <div id="lock-cleared" hidden>
+        <p style="color:#bdf0cf;font-weight:600">You've been cleared.</p>
+        <button class="btn primary lg" id="lock-return"><span data-icon="expand"></span>Return to full screen</button>
+      </div>
+      <div style="margin-top:26px"><button class="btn sm ghost" id="lock-leave" style="color:rgba(255,255,255,.7)">Back to assignments</button></div>
+    </div>
+  </div>
+
+  <!-- Needs fullscreen again (e.g. browser blocked the request) -->
+  <div class="overlay" id="ov-fs" hidden>
+    <div class="ov-card">
+      <div class="icon info-icon"><span data-icon="expand"></span></div>
+      <h2>Full screen is required</h2>
+      <p class="muted">Click below to go back to full screen and keep writing.</p>
+      <button class="btn primary lg" id="fs-go"><span data-icon="expand"></span>Go full screen</button>
+    </div>
+  </div>
+
+  <!-- Time's up / opened elsewhere / submitted -->
+  <div class="overlay" id="ov-msg" hidden>
+    <div class="ov-card">
+      <div class="icon" id="msg-icon"></div>
+      <h2 id="msg-title"></h2>
+      <p class="muted" id="msg-text"></p>
+      <button class="btn primary lg" id="msg-btn">Back to assignments</button>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <script src="js/config.js?v=1"></script>
+  <script src="js/common.js?v=1"></script>
+  <script src="js/editor.js?v=1"></script>
+  <script src="js/student.js?v=1"></script>
+</body>
+</html>
