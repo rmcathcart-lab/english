@@ -138,6 +138,15 @@ function makeContext(opts) {
     SpreadsheetApp: { getActiveSpreadsheet: () => ss },
     CacheService: { getScriptCache: () => cache },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => (props.has(k) ? props.get(k) : null), setProperty: (k, v) => props.set(k, String(v)), deleteProperty: k => props.delete(k) }) },
+    UrlFetchApp: {
+      fetchAll: reqs => reqs.map(q => {
+        const u = q.url;
+        const body = /rel_syn/.test(u) ? [{ word: 'glad' }, { word: 'joyful' }] : /rel_ant/.test(u) ? [{ word: 'sad' }] : /ml=/.test(u) ? [{ word: 'pleased' }]
+          : [{ word: 'happy', meanings: [{ partOfSpeech: 'adjective', definitions: [{ definition: 'Feeling pleasure (server copy).' }] }] }];
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+      }),
+      fetch: () => ({ getResponseCode: () => 200, getContentText: () => '[]' })
+    },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: s => ({ s, setMimeType() { return this; }, getContent() { return s; } }) },
     Utilities: {

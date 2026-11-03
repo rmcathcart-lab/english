@@ -14,11 +14,8 @@ const log = (...a) => console.log('•', ...a);
 // Fake dictionary + thesaurus responses (the real APIs aren't reachable from this sandbox).
 async function mockLookups(ctx) {
   await ctx.route('https://api.dictionaryapi.dev/**', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify([{ word: 'happy', phonetic: '/ˈhæpi/', meanings: [{ partOfSpeech: 'adjective', definitions: [{ definition: 'Feeling or showing pleasure or contentment.', example: 'a happy smile', synonyms: ['cheerful'] }], synonyms: ['joyful'], antonyms: ['sad'] }] }]) }));
-  await ctx.route('https://api.datamuse.com/**', r => {
-    const u = r.request().url();
-    const body = /rel_syn/.test(u) ? [{ word: 'glad' }, { word: 'content' }] : /rel_ant/.test(u) ? [{ word: 'unhappy' }] : [{ word: 'delighted' }];
-    r.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-  });
+  // Datamuse refuses the browser (like it does from GitHub Pages) → synonyms come through the server.
+  await ctx.route('https://api.datamuse.com/**', r => r.abort('failed'));
 }
 
 // A fake SpeechRecognition that "hears" a sentence a moment after it starts.
@@ -120,6 +117,7 @@ const FAKE_STT = `
   await student.waitForSelector('.lk-defs li');
   log('definition:', (await student.textContent('.lk-defs li')).trim());
   await student.click('.lk-tabs [data-tab=syn]');
+  log('thesaurus chips (via server):', (await student.$$eval('.lk-chip', b => b.map(x => x.textContent))).join(', '));
   await student.click('.lk-chip:text-is("glad")');
   await sleep(300);
   text = await student.textContent(SDOC);

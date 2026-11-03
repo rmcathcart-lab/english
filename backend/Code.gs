@@ -10,7 +10,7 @@
  * The sheet layout upgrades itself on the first request after an update.
  */
 
-const APP = { name: 'Inkwell', version: '2.0.0' };
+const APP = { name: 'Inkwell', version: '2.0.1' };
 const SCHEMA_VERSION = '2';
 const DEFAULT_PASSWORD = 'english2026';
 const DEFAULT_TZ = 'America/Edmonton';
@@ -133,7 +133,7 @@ function json_(o) {
 const ROUTES = {
   // students
   sLogin: sLogin, sHome: sHome, sStart: sStart, sSave: sSave, sPing: sPing, sLock: sLock,
-  sStatus: sStatus, sSubmit: sSubmit, sExit: sExit, sView: sView, sComments: sComments, sResolveComment: sResolveComment,
+  sStatus: sStatus, sSubmit: sSubmit, sExit: sExit, sView: sView, sComments: sComments, sResolveComment: sResolveComment, sLookup: sLookup,
   // teacher
   tLogin: tLogin, tBoot: tBoot, tSaveClass: tSaveClass, tDeleteClass: tDeleteClass,
   tAddStudents: tAddStudents, tSaveStudent: tSaveStudent, tDeleteStudent: tDeleteStudent, tRegenCode: tRegenCode,
@@ -903,6 +903,43 @@ function sResolveComment(p) {
   upsert_('comments', strip_(c));
   touchComments_(c.aid, c.sid);
   return { comment: studentComment_(Object.assign(strip_(c), { offset: Number(c.offset) || 0 })) };
+}
+
+/**
+ * Dictionary + thesaurus lookups fetched by the server, for browsers or school networks that
+ * can't reach the word services directly. Results are cached for six hours.
+ */
+function sLookup(p) {
+  try { verify_(p.token, 's'); } catch (e) { verify_(p.token, 't'); }
+  const w = String(p.word || '').toLowerCase().replace(/[^a-z\u00c0-\u024f' -]/g, '').trim().slice(0, 40);
+  if (!w) throw err_('Type a word to look up.');
+  const key = 'lk2:' + w;
+  const hit = cache_().get(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) { /* refetch */ } }
+  const enc = encodeURIComponent(w);
+  const urls = [
+    'https://api.datamuse.com/words?rel_syn=' + enc + '&max=40',
+    'https://api.datamuse.com/words?ml=' + enc + '&max=24',
+    'https://api.datamuse.com/words?rel_ant=' + enc + '&max=16',
+    'https://api.dictionaryapi.dev/api/v2/entries/en/' + enc
+  ];
+  const res = UrlFetchApp.fetchAll(urls.map(function (u) { return { url: u, muteHttpExceptions: true }; }));
+  const words = function (r) {
+    if (r.getResponseCode() !== 200) return [];
+    try { return JSON.parse(r.getContentText()).map(function (x) { return x.word; }).filter(String); } catch (e) { return []; }
+  };
+  let dict = null;
+  if (res[3].getResponseCode() === 200) { try { dict = JSON.parse(res[3].getContentText()); } catch (e) { dict = null; } }
+  else if (res[3].getResponseCode() === 404) dict = [];
+  const out = { syn: words(res[0]), ml: words(res[1]), ant: words(res[2]), dict: dict };
+  try { cache_().put(key, JSON.stringify(out), 21600); } catch (e) { /* too large to cache */ }
+  return out;
+}
+
+/** Run once from the editor after updating, so Google asks for the "connect to external services" permission. */
+function authorize() {
+  UrlFetchApp.fetch('https://api.datamuse.com/words?ml=writing&max=1', { muteHttpExceptions: true });
+  return 'Authorized.';
 }
 
 /* ───────────────────────── Teacher API ───────────────────────── */

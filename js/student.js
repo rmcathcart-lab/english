@@ -353,7 +353,8 @@
 
     lookupPanel = Ink.Lookup.panel($('#lookup-host'), {
       onUse: function (word, range) { return internalInsert(range, word, false); },
-      onLookup: function () { if (W) W.d.look++; }
+      onLookup: function () { if (W) W.d.look++; },
+      proxy: function (word) { return Ink.call('sLookup', { token: auth.token, word: word }, { timeout: 20000 }); }
     });
 
     reader = Ink.Speech.reader({ onState: ttsState });

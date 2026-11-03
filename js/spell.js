@@ -19,7 +19,7 @@
     let pop = null;
 
     try {
-      worker = new Worker('js/spell-worker.js?v=2');
+      worker = new Worker('js/spell-worker.js?v=3');
       worker.onmessage = function (e) {
         const m = e.data;
         if (m.type === 'ready') { ready = true; run(); }

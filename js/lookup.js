@@ -14,44 +14,64 @@
     } finally { clearTimeout(t); }
   }
 
-  async function lookup(word) {
+  function shape(word, dictJson, syn, ml, ant) {
+    const w = word.toLowerCase();
+    const out = { word: word, defs: [], syn: [], rel: [], ant: [], phonetic: '', error: false };
+    if (Array.isArray(dictJson)) {
+      const synSeen = new Set();
+      dictJson.forEach(function (entry) {
+        if (!out.phonetic && entry.phonetic) out.phonetic = entry.phonetic;
+        (entry.meanings || []).forEach(function (mn) {
+          let group = out.defs.find(function (g) { return g.pos === mn.partOfSpeech; });
+          if (!group) { group = { pos: mn.partOfSpeech, items: [] }; out.defs.push(group); }
+          (mn.definitions || []).slice(0, 4).forEach(function (d) {
+            if (group.items.length < 4) group.items.push({ def: d.definition, ex: d.example || '' });
+            (d.synonyms || []).forEach(function (x) { synSeen.add(x); });
+            (d.antonyms || []).forEach(function (x) { if (out.ant.indexOf(x) < 0) out.ant.push(x); });
+          });
+          (mn.synonyms || []).forEach(function (x) { synSeen.add(x); });
+          (mn.antonyms || []).forEach(function (x) { if (out.ant.indexOf(x) < 0) out.ant.push(x); });
+        });
+      });
+      out.syn = Array.from(synSeen);
+    }
+    const ok = function (x) { return x && x.split(' ').length <= 2; };
+    (syn || []).filter(ok).forEach(function (x) { if (out.syn.indexOf(x) < 0) out.syn.push(x); });
+    const synSet = new Set(out.syn);
+    out.rel = (ml || []).filter(ok).filter(function (x) { return !synSet.has(x) && x.toLowerCase() !== w; }).slice(0, 18);
+    (ant || []).filter(ok).forEach(function (x) { if (out.ant.indexOf(x) < 0) out.ant.push(x); });
+    out.syn = out.syn.filter(function (x) { return x.toLowerCase() !== w; }).slice(0, 30);
+    out.ant = out.ant.slice(0, 14);
+    return out;
+  }
+
+  const words = function (j) { return Array.isArray(j) ? j.map(function (x) { return x.word; }) : null; };
+
+  /** proxy(word) → server copy { syn, ml, ant, dict } — used when the browser can't reach a service. */
+  async function lookup(word, proxy) {
     const w = word.toLowerCase();
     if (cache.has(w)) return cache.get(w);
-    const p = Promise.all([
-      getJSON('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(w)).catch(function () { return 'ERR'; }),
-      getJSON('https://api.datamuse.com/words?rel_syn=' + encodeURIComponent(w) + '&max=40').catch(function () { return 'ERR'; }),
-      getJSON('https://api.datamuse.com/words?ml=' + encodeURIComponent(w) + '&max=24').catch(function () { return 'ERR'; }),
-      getJSON('https://api.datamuse.com/words?rel_ant=' + encodeURIComponent(w) + '&max=16').catch(function () { return 'ERR'; })
-    ]).then(function (r) {
-      const out = { word: word, defs: [], syn: [], rel: [], ant: [], phonetic: '', error: r[0] === 'ERR' && r[1] === 'ERR' };
-      if (Array.isArray(r[0])) {
-        const synSeen = new Set();
-        r[0].forEach(function (entry) {
-          if (!out.phonetic && entry.phonetic) out.phonetic = entry.phonetic;
-          (entry.meanings || []).forEach(function (mn) {
-            let group = out.defs.find(function (g) { return g.pos === mn.partOfSpeech; });
-            if (!group) { group = { pos: mn.partOfSpeech, items: [] }; out.defs.push(group); }
-            (mn.definitions || []).slice(0, 4).forEach(function (d) {
-              if (group.items.length < 4) group.items.push({ def: d.definition, ex: d.example || '' });
-              (d.synonyms || []).forEach(function (s) { synSeen.add(s); });
-            });
-            (mn.synonyms || []).forEach(function (s) { synSeen.add(s); });
-            (mn.antonyms || []).forEach(function (s) { if (out.ant.indexOf(s) < 0) out.ant.push(s); });
-          });
-        });
-        out.syn = Array.from(synSeen);
+    const p = (async function () {
+      const enc = encodeURIComponent(w);
+      const r = await Promise.all([
+        getJSON('https://api.dictionaryapi.dev/api/v2/entries/en/' + enc).then(function (j) { return j === null ? [] : j; }).catch(function () { return 'ERR'; }),
+        getJSON('https://api.datamuse.com/words?rel_syn=' + enc + '&max=40').catch(function () { return 'ERR'; }),
+        getJSON('https://api.datamuse.com/words?ml=' + enc + '&max=24').catch(function () { return 'ERR'; }),
+        getJSON('https://api.datamuse.com/words?rel_ant=' + enc + '&max=16').catch(function () { return 'ERR'; })
+      ]);
+      let dict = r[0], syn = words(r[1]), ml = words(r[2]), ant = words(r[3]);
+      if ((dict === 'ERR' || syn === null) && proxy) {
+        try {
+          const s = await proxy(word);
+          if (dict === 'ERR' && s.dict) dict = s.dict;
+          if (syn === null) { syn = s.syn; ml = s.ml; ant = s.ant; }
+        } catch (e) { /* fall through with what we have */ }
       }
-      const clean = function (list) { return Array.isArray(list) ? list.map(function (x) { return x.word; }).filter(function (x) { return x && x.indexOf(' ') < 0 || x.split(' ').length <= 2; }) : []; };
-      clean(r[1]).forEach(function (s) { if (out.syn.indexOf(s) < 0) out.syn.push(s); });
-      const synSet = new Set(out.syn);
-      out.rel = clean(r[2]).filter(function (s) { return !synSet.has(s) && s.toLowerCase() !== w; }).slice(0, 18);
-      clean(r[3]).forEach(function (s) { if (out.ant.indexOf(s) < 0) out.ant.push(s); });
-      out.syn = out.syn.filter(function (s) { return s.toLowerCase() !== w; }).slice(0, 30);
-      out.ant = out.ant.slice(0, 14);
-      return out;
-    });
+      if (dict === 'ERR' && syn === null) return { word: word, error: true };
+      return shape(word, dict === 'ERR' ? null : dict, syn, ml, ant);
+    })();
     cache.set(w, p);
-    p.catch(function () { cache.delete(w); });
+    p.then(function (x) { if (x.error) cache.delete(w); }, function () { cache.delete(w); });
     return p;
   }
 
@@ -90,7 +110,7 @@
       body.innerHTML = '<div class="muted small"><span class="spin sm"></span> Looking up “' + Ink.esc(word) + '”…</div>';
       if (opts.onLookup) opts.onLookup(word);
       let r;
-      try { r = await lookup(word); } catch (e) { r = { error: true }; }
+      try { r = await lookup(word, opts.proxy); } catch (e) { r = { error: true }; }
       if (input.value.trim().toLowerCase() !== word.toLowerCase()) return;
       current = r;
       render();
