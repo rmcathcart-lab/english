@@ -11,6 +11,7 @@ function makeSheet(name) {
     name,
     data,
     getName: () => name,
+    getLastColumn: () => data.reduce((m, r) => { if (!r) return m; let k = r.length; while (k > 0 && (r[k - 1] === '' || r[k - 1] === undefined || r[k - 1] === null)) k--; return Math.max(m, k); }, 0),
     getLastRow: () => {
       for (let i = data.length - 1; i >= 0; i--) if (data[i] && data[i].some(v => v !== '' && v !== undefined && v !== null)) return i + 1;
       return 0;
@@ -47,6 +48,7 @@ function makeSheet(name) {
         },
         setValue(v) { return range.setValues([[v]]); },
         setFontWeight() { return range; },
+        clearContent() { for (let i = 0; i < nr; i++) { const row = data[r0 - 1 + i]; if (row) for (let j = 0; j < nc; j++) row[c0 - 1 + j] = ''; } return range; },
         createTextFinder(text) {
           let whole = false;
           const f = {
@@ -125,10 +127,11 @@ function formatDate(date, tz, pattern) {
   return out;
 }
 
-function makeContext() {
-  const ss = makeSpreadsheet();
-  const cache = makeCache();
-  const props = new Map();
+function makeContext(opts) {
+  opts = opts || {};
+  const ss = opts.ss || makeSpreadsheet();
+  const cache = opts.cache || makeCache();
+  const props = opts.props || new Map();
   const toSigned = buf => Array.from(buf).map(b => (b > 127 ? b - 256 : b));
   const ctx = {
     console,
@@ -152,9 +155,10 @@ function makeContext() {
     Date, Math, JSON, Object, Array, String, Number, Error, RegExp, Buffer
   };
   vm.createContext(ctx);
-  const code = fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8');
+  const code = opts.code || fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8');
   vm.runInContext(code, ctx, { filename: 'Code.gs' });
   ctx._ss = ss; ctx._cache = cache; ctx._props = props;
+  ctx.ev = s => vm.runInContext(s, ctx);
   ctx.call = (body) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent());
   return ctx;
 }

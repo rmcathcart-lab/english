@@ -9,9 +9,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=1">
+  <link rel="stylesheet" href="css/style.css?v=2">
 </head>
-<body>
+<body class="teacher">
   <section id="t-login" class="center-screen" hidden>
     <div class="card login-card">
       <div class="brand"><span data-icon="mark"></span>Inkwell <small>Teacher</small></div>
@@ -27,10 +27,11 @@
   </section>
 
   <section id="t-app" hidden>
-    <header class="t-top">
+    <header class="t-top no-print">
       <div class="brand"><span data-icon="mark"></span>Inkwell</div>
       <nav class="tabs" id="tabs">
         <button class="tab on" data-tab="live">Live <span class="count" id="lock-count" hidden>0</span></button>
+        <button class="tab" data-tab="grade">Grade</button>
         <button class="tab" data-tab="assignments">Assignments</button>
         <button class="tab" data-tab="classes">Classes &amp; students</button>
         <button class="tab" data-tab="settings">Settings</button>
@@ -42,9 +43,13 @@
   </section>
 
   <div id="toasts"></div>
-  <script src="js/config.js?v=1"></script>
-  <script src="js/common.js?v=1"></script>
-  <script src="js/editor.js?v=1"></script>
-  <script src="js/teacher.js?v=1"></script>
+  <script src="js/config.js?v=2"></script>
+  <script src="js/common.js?v=2"></script>
+  <script src="js/textmodel.js?v=2"></script>
+  <script src="js/editor.js?v=2"></script>
+  <script src="js/rubric.js?v=2"></script>
+  <script src="js/pdf.js?v=2"></script>
+  <script src="js/calendar.js?v=2"></script>
+  <script src="js/teacher.js?v=2"></script>
 </body>
 </html>

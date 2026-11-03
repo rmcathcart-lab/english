@@ -5,41 +5,53 @@
  * First-time setup:  run setup() once from the Apps Script editor (Run ▶),
  * then Deploy → New deployment → Web app (Execute as: Me, Access: Anyone).
  * The front end (GitHub Pages) talks to the /exec URL with POST requests.
+ *
+ * Updating: paste the new code, save, then Deploy → Manage deployments → ✏️ → Version: New version.
+ * The sheet layout upgrades itself on the first request after an update.
  */
 
-const APP = { name: 'Inkwell', version: '1.0.0' };
+const APP = { name: 'Inkwell', version: '2.0.0' };
+const SCHEMA_VERSION = '2';
 const DEFAULT_PASSWORD = 'english2026';
 const DEFAULT_TZ = 'America/Edmonton';
 
 const SHEETS = {
   classes: ['id', 'name', 'schedule', 'demo', 'created'],
   students: ['id', 'classId', 'first', 'last', 'code', 'accom', 'active', 'created'],
-  assignments: ['id', 'classIds', 'title', 'prompt', 'settings', 'override', 'created', 'updated', 'archived'],
-  work: ['key', 'aid', 'sid', 'status', 'words', 'chars', 'startedAt', 'lastSaveAt', 'submittedAt',
-    'keystrokes', 'deletions', 'activeSec', 'pasteBlocked', 'rev', 'sessionId', 'lastRevAt', 'cleanExit',
-    'insertBlocked', 'updated',
-    'locked', 'lockReason', 'lockedAt', 'lockCount', 'unlockedAt', 'lockSession'],
+  assignments: ['id', 'classIds', 'title', 'prompt', 'settings', 'override', 'rubric', 'created', 'updated', 'archived'],
+  work: ['key', 'aid', 'sid',
+    // main block (written by student saves)
+    'status', 'words', 'chars', 'startedAt', 'lastSaveAt', 'submittedAt', 'keystrokes', 'deletions', 'activeSec',
+    'openSec', 'lockedSec', 'dictated', 'lookups', 'sessions', 'pasteBlocked', 'rev', 'sessionId', 'lastRevAt',
+    'cleanExit', 'insertBlocked', 'updated',
+    // lock block
+    'locked', 'lockReason', 'lockedAt', 'lockCount', 'unlockedAt', 'lockSession',
+    // read-only view block
+    'viewCount', 'lastViewAt',
+    // comments block
+    'commentsAt'],
   docs: ['key', 'rev', 'updated', 'c1', 'c2', 'c3', 'c4', 'c5'],
   revisions: ['key', 'ts', 'words', 'chars', 'c1', 'c2', 'c3'],
-  events: ['ts', 'key', 'aid', 'sid', 'type', 'detail']
+  events: ['ts', 'key', 'aid', 'sid', 'type', 'detail'],
+  grades: ['key', 'aid', 'sid', 'scores', 'comment', 'total', 'max', 'graded', 'updated'],
+  comments: ['id', 'key', 'aid', 'sid', 'quote', 'prefix', 'suffix', 'offset', 'text', 'created', 'updated', 'resolved', 'resolvedAt', 'deleted'],
+  absences: ['key', 'date', 'sid', 'created']
 };
-const JSON_COLS = { schedule: 1, accom: 1, classIds: 1, settings: 1, override: 1 };
+const JSON_COLS = { schedule: 1, accom: 1, classIds: 1, settings: 1, override: 1, rubric: 1, scores: 1 };
 const W = {}; SHEETS.work.forEach(function (c, i) { W[c] = i + 1; });
 const WCOLS = SHEETS.work.length;
+const WORK_NUM = ['words', 'chars', 'startedAt', 'lastSaveAt', 'submittedAt', 'keystrokes', 'deletions', 'activeSec', 'openSec',
+  'lockedSec', 'dictated', 'lookups', 'sessions', 'pasteBlocked', 'rev', 'lastRevAt', 'insertBlocked', 'updated', 'lockedAt',
+  'lockCount', 'unlockedAt', 'viewCount', 'lastViewAt', 'commentsAt'];
 const CHUNK = 45000;
 
-/* ───────────────────────── Setup ───────────────────────── */
+/* ───────────────────────── Setup & schema ───────────────────────── */
 
 function setup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!/^Inkwell/.test(ss.getName()) || /\)nkwell|Untitled/.test(ss.getName())) ss.rename('Inkwell Writing Studio (data)');
-  Object.keys(SHEETS).forEach(function (name) {
-    let sh = ss.getSheetByName(name);
-    if (!sh) sh = ss.insertSheet(name);
-    const head = SHEETS[name];
-    sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
-    sh.setFrozenRows(1);
-  });
+  PropertiesService.getScriptProperties().deleteProperty('SCHEMA');
+  ensureSchema_();
   const def = ss.getSheetByName('Sheet1');
   if (def && ss.getSheets().length > 1 && def.getLastRow() <= 1) ss.deleteSheet(def);
   const props = PropertiesService.getScriptProperties();
@@ -51,15 +63,58 @@ function setup() {
   return 'Inkwell is set up. Teacher password: ' + (props.getProperty('PW_IS_DEFAULT') ? DEFAULT_PASSWORD : '(unchanged)');
 }
 
+/**
+ * Creates missing sheets and upgrades column layouts by matching header names,
+ * so data written by an older version keeps working.
+ */
+function ensureSchema_() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('SCHEMA') === SCHEMA_VERSION) return;
+  withLock_(function () {
+    if (props.getProperty('SCHEMA') === SCHEMA_VERSION) return;
+    const ss = ss_();
+    Object.keys(SHEETS).forEach(function (name) {
+      const head = SHEETS[name];
+      let sh = ss.getSheetByName(name);
+      if (!sh) {
+        sh = ss.insertSheet(name);
+        sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+        sh.setFrozenRows(1);
+        return;
+      }
+      const lastCol = Math.max(sh.getLastColumn(), 1);
+      const old = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+      const same = old.length >= head.length && head.every(function (h, i) { return old[i] === h; });
+      if (same) return;
+      const last = sh.getLastRow();
+      if (last > 1 && old.some(String)) {
+        const vals = sh.getRange(2, 1, last - 1, lastCol).getValues();
+        const idx = head.map(function (h) { return old.indexOf(h); });
+        const rows = vals.map(function (r) { return idx.map(function (j) { return j >= 0 ? r[j] : ''; }); });
+        sh.getRange(1, 1, last, Math.max(lastCol, head.length)).clearContent();
+        sh.getRange(2, 1, rows.length, head.length).setValues(rows);
+      }
+      sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+    });
+    props.setProperty('SCHEMA', SCHEMA_VERSION);
+  });
+  clearTableCache_();
+}
+
 /* ───────────────────────── HTTP ───────────────────────── */
 
 function doGet() {
   return json_({ ok: true, app: APP.name, version: APP.version });
 }
 
+let REQ = {}; // per-request memo
+
 function doPost(e) {
   let out;
+  REQ = {};
   try {
+    ensureSchema_();
     const p = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const fn = ROUTES[p.action];
     if (!fn) throw new Error('Unknown action: ' + p.action);
@@ -78,14 +133,16 @@ function json_(o) {
 const ROUTES = {
   // students
   sLogin: sLogin, sHome: sHome, sStart: sStart, sSave: sSave, sPing: sPing, sLock: sLock,
-  sStatus: sStatus, sSubmit: sSubmit, sExit: sExit, sView: sView,
+  sStatus: sStatus, sSubmit: sSubmit, sExit: sExit, sView: sView, sComments: sComments, sResolveComment: sResolveComment,
   // teacher
   tLogin: tLogin, tBoot: tBoot, tSaveClass: tSaveClass, tDeleteClass: tDeleteClass,
   tAddStudents: tAddStudents, tSaveStudent: tSaveStudent, tDeleteStudent: tDeleteStudent, tRegenCode: tRegenCode,
   tSaveAssignment: tSaveAssignment, tDeleteAssignment: tDeleteAssignment, tOverride: tOverride,
   tMonitor: tMonitor, tWork: tWork, tRevision: tRevision, tUnlock: tUnlock, tLock: tLock,
   tReturn: tReturn, tExport: tExport, tPassword: tPassword, tDemoSeed: tDemoSeed, tDemoClear: tDemoClear,
-  tDemoTick: tDemoTick
+  tDemoTick: tDemoTick, tSetAbsent: tSetAbsent, tSetDaysOff: tSetDaysOff,
+  tAddComment: tAddComment, tEditComment: tEditComment, tDeleteComment: tDeleteComment,
+  tSaveGrade: tSaveGrade, tGradeBoard: tGradeBoard, tRecord: tRecord
 };
 
 /* ───────────────────────── Errors / auth ───────────────────────── */
@@ -150,6 +207,7 @@ function dec_(v) {
   if (typeof v === 'string' && v.charAt(0) === '~') return v.slice(1);
   return v;
 }
+function bool_(v) { return v === true || v === 'TRUE' || v === 'true'; }
 
 function rowToObj_(name, row, rowNum) {
   const o = {};
@@ -174,13 +232,14 @@ function objToRow_(name, o) {
 
 function cache_() { return CacheService.getScriptCache(); }
 
-const TABLE_CACHED = { classes: 1, students: 1, assignments: 1 };
+const TABLE_CACHED = { classes: 1, students: 1, assignments: 1, grades: 1, comments: 1, absences: 1 };
 
 function readTable_(name) {
+  if (REQ['t:' + name]) return REQ['t:' + name];
   const c = cache_();
   if (TABLE_CACHED[name]) {
-    const hit = c.get('tbl2:' + name);
-    if (hit) { try { return JSON.parse(hit); } catch (e) { /* fall through */ } }
+    const hit = c.get('tbl3:' + name);
+    if (hit) { try { return (REQ['t:' + name] = JSON.parse(hit)); } catch (e) { /* fall through */ } }
   }
   const sh = sheet_(name);
   const last = sh.getLastRow();
@@ -190,19 +249,22 @@ function readTable_(name) {
     out = vals.map(function (r, i) { return rowToObj_(name, r, i + 2); }).filter(function (o) { return o[SHEETS[name][0]]; });
   }
   if (TABLE_CACHED[name]) {
-    try { c.put('tbl2:' + name, JSON.stringify(out), 600); } catch (e) { /* too big to cache */ }
+    try { c.put('tbl3:' + name, JSON.stringify(out), 600); } catch (e) { /* too big to cache */ }
   }
+  REQ['t:' + name] = out;
   return out;
 }
 
 function clearTableCache_(name) {
   const names = name ? [name] : Object.keys(TABLE_CACHED);
-  cache_().removeAll(names.map(function (n) { return 'tbl2:' + n; }));
+  cache_().removeAll(names.map(function (n) { return 'tbl3:' + n; }));
+  names.forEach(function (n) { delete REQ['t:' + n]; });
 }
 
 function findById_(name, id) {
   const t = readTable_(name);
-  for (let i = 0; i < t.length; i++) if (t[i].id === id) return t[i];
+  const k = SHEETS[name][0];
+  for (let i = 0; i < t.length; i++) if (t[i][k] === id) return t[i];
   return null;
 }
 
@@ -213,12 +275,13 @@ function withLock_(fn) {
 }
 
 function upsert_(name, obj) {
+  const k = SHEETS[name][0];
   return withLock_(function () {
     clearTableCache_(name);
     const sh = sheet_(name);
     const t = readTable_(name);
     let row = 0;
-    for (let i = 0; i < t.length; i++) if (t[i].id === obj.id) { row = t[i]._row; break; }
+    for (let i = 0; i < t.length; i++) if (t[i][k] === obj[k]) { row = t[i]._row; break; }
     if (!row) row = Math.max(sh.getLastRow(), 1) + 1;
     sh.getRange(row, 1, 1, SHEETS[name].length).setValues([objToRow_(name, obj)]);
     clearTableCache_(name);
@@ -236,6 +299,8 @@ function deleteRowsWhere_(name, pred) {
     return t.length;
   });
 }
+
+function strip_(o) { const c = Object.assign({}, o); delete c._row; return c; }
 
 function newId_(prefix) { return prefix + '_' + Utilities.getUuid().replace(/-/g, '').slice(0, 10); }
 
@@ -255,14 +320,16 @@ function findWorkRow_(key) {
   return f.getRow();
 }
 
+function normWork_(w) {
+  WORK_NUM.forEach(function (k) { w[k] = Number(w[k]) || 0; });
+  w.locked = bool_(w.locked);
+  w.cleanExit = bool_(w.cleanExit);
+  return w;
+}
+
 function readWork_(row) {
   const v = sheet_('work').getRange(row, 1, 1, WCOLS).getValues()[0];
-  const w = rowToObj_('work', v, row);
-  ['words', 'chars', 'startedAt', 'lastSaveAt', 'submittedAt', 'keystrokes', 'deletions', 'activeSec', 'pasteBlocked',
-    'rev', 'lastRevAt', 'insertBlocked', 'updated', 'lockedAt', 'lockCount', 'unlockedAt'].forEach(function (k) { w[k] = Number(w[k]) || 0; });
-  w.locked = w.locked === true || w.locked === 'TRUE';
-  w.cleanExit = w.cleanExit === true || w.cleanExit === 'TRUE';
-  return w;
+  return normWork_(rowToObj_('work', v, row));
 }
 
 function createWork_(aid, sid) {
@@ -275,16 +342,19 @@ function createWork_(aid, sid) {
     const ds = sheet_('docs');
     row = Math.max(sh.getLastRow(), ds.getLastRow(), 1) + 1;
     const now = Date.now();
-    const w = {
-      key: key, aid: aid, sid: sid, status: 'draft', words: 0, chars: 0, startedAt: now, lastSaveAt: 0, submittedAt: 0,
-      keystrokes: 0, deletions: 0, activeSec: 0, pasteBlocked: 0, rev: 0, sessionId: '', lastRevAt: 0, cleanExit: true,
-      insertBlocked: 0, updated: now, locked: false, lockReason: '', lockedAt: 0, lockCount: 0, unlockedAt: 0, lockSession: ''
-    };
+    const w = blankWork_(aid, sid, now);
     sh.getRange(row, 1, 1, WCOLS).setValues([objToRow_('work', w)]);
     ds.getRange(row, 1, 1, SHEETS.docs.length).setValues([objToRow_('docs', { key: key, rev: 0, updated: now })]);
     cache_().put('wr:' + key, String(row), 21600);
     return row;
   });
+}
+
+function blankWork_(aid, sid, now) {
+  const w = { key: workKey_(aid, sid), aid: aid, sid: sid, status: 'draft', sessionId: '', cleanExit: true, locked: false, lockReason: '', lockSession: '' };
+  WORK_NUM.forEach(function (k) { w[k] = 0; });
+  w.startedAt = now; w.updated = now;
+  return w;
 }
 
 // Writes a contiguous block of work columns (so a save never overwrites lock fields and vice versa).
@@ -295,6 +365,11 @@ function writeWorkCols_(row, w, from, to) {
 }
 function writeMain_(row, w) { w.updated = Date.now(); writeWorkCols_(row, w, 'status', 'updated'); }
 function writeLock_(row, w) { writeWorkCols_(row, w, 'locked', 'lockSession'); }
+function writeView_(row, w) { writeWorkCols_(row, w, 'viewCount', 'lastViewAt'); }
+function touchComments_(aid, sid) {
+  const row = findWorkRow_(workKey_(aid, sid));
+  if (row) sheet_('work').getRange(row, W.commentsAt, 1, 1).setValues([[Date.now()]]);
+}
 
 function readDoc_(row) {
   const v = sheet_('docs').getRange(row, 1, 1, SHEETS.docs.length).getValues()[0];
@@ -326,7 +401,7 @@ function heartbeat_(key, focused) {
   cache_().put('hb:' + key, JSON.stringify({ t: Date.now(), f: focused === false ? 0 : 1 }), 600);
 }
 
-/* ───────────────────────── Time & availability ───────────────────────── */
+/* ───────────────────────── Time, days off, absences ───────────────────────── */
 
 function localParts_(ms) {
   const s = Utilities.formatDate(new Date(ms), tz_(), "yyyy-MM-dd'|'HH:mm'|'u'|'Z");
@@ -358,22 +433,46 @@ function dowOf_(dateStr) {
   return w === 0 ? 7 : w;
 }
 
+function today_() { return REQ.today || (REQ.today = localParts_(Date.now()).date); }
+
+function daysOff_() {
+  if (REQ.daysOff) return REQ.daysOff;
+  let m = {};
+  try { m = JSON.parse(PropertiesService.getScriptProperties().getProperty('DAYS_OFF') || '{}') || {}; } catch (e) { m = {}; }
+  return (REQ.daysOff = m);
+}
+
+function absentToday_(sid) {
+  if (!REQ.absent) {
+    const t = today_();
+    REQ.absent = {};
+    readTable_('absences').forEach(function (a) { if (a.date === t) REQ.absent[a.sid] = 1; });
+  }
+  return !!REQ.absent[sid];
+}
+
 /**
  * Is an assignment open for a student (in a class) right now?
- * Returns { open, closesAt, opensAt, label, via }.
+ * Returns { open, closesAt, opensAt, label, via, absent, dayOff }.
  */
 function windowFor_(a, cls, stu, now) {
   const st = a.settings || {};
   if (a.archived) return { open: false, label: 'Archived' };
+  if (stu && absentToday_(stu.id)) return { open: false, absent: true, label: 'Marked absent today' };
+  const off = daysOff_();
+  const today = localParts_(now).date;
   const ov = a.override;
   if (ov && ov.mode && (!ov.until || ov.until > now)) {
     if (ov.mode === 'open') return { open: true, closesAt: ov.until || null, label: 'Opened by teacher', via: 'override' };
     if (ov.mode === 'closed') return { open: false, label: 'Closed by teacher', via: 'override' };
   }
-  const today = localParts_(now).date;
   const startD = st.startDate || '';
   const endD = st.endDate || '';
   if (endD && today > endD) return { open: false, label: 'Closed', ended: true };
+  if (off[today]) {
+    const nxt = nextSchoolDay_(today, endD);
+    return { open: false, dayOff: true, label: 'No school today' + (off[today] && off[today] !== 'Day off' ? ' (' + off[today] + ')' : ''), opensAt: null, nextDay: nxt };
+  }
   const mode = st.openMode || 'class';
   if (mode === 'manual') return { open: false, label: 'Waiting for your teacher to open it' };
   const extended = !!(stu && stu.accom && stu.accom.extended);
@@ -382,14 +481,15 @@ function windowFor_(a, cls, stu, now) {
 
   if (mode === 'always' || extended) {
     if (startD && today < startD) return { open: false, opensAt: localToMs_(startD, '00:00'), label: 'Not open yet' };
-    return { open: true, closesAt: endD ? localToMs_(addDays_(endD, 1), '00:00') : null, label: extended && mode !== 'always' ? 'Open (extended access)' : 'Open' };
+    return { open: true, closesAt: endD ? localToMs_(addDays_(endD, 1), '00:00') : null, label: extended && mode !== 'always' ? 'Open (extended access)' : 'Open', via: 'always' };
   }
 
   let next = 0;
-  for (let k = 0; k < 21; k++) {
+  for (let k = 0; k < 40; k++) {
     const date = addDays_(today, k);
     if (endD && date > endD) break;
     if (startD && date < startD) continue;
+    if (off[date]) continue;
     const dow = dowOf_(date);
     for (let i = 0; i < periods.length; i++) {
       const p = periods[i];
@@ -402,6 +502,100 @@ function windowFor_(a, cls, stu, now) {
     if (next) break;
   }
   return next ? { open: false, opensAt: next, label: 'Opens next class' } : { open: false, label: periods.length ? 'No more class time scheduled' : 'No class time set up yet' };
+}
+
+function nextSchoolDay_(fromDate, endD) {
+  const off = daysOff_();
+  for (let k = 1; k < 60; k++) {
+    const d = addDays_(fromDate, k);
+    if (endD && d > endD) return '';
+    if (dowOf_(d) <= 5 && !off[d]) return d;
+  }
+  return '';
+}
+
+/* ───────────────────────── Shared shapes ───────────────────────── */
+
+function accomOf_(stu) {
+  const a = (stu && stu.accom) || {};
+  return { extended: !!a.extended, stt: !!(a.stt || a.relaxed), tts: !!a.tts };
+}
+
+function goal_(a) {
+  const st = a.settings || {};
+  return { min: Number(st.minWords) || 0, max: Number(st.maxWords) || 0, show: st.showGoal !== false };
+}
+
+function toolsFor_(a, stu) {
+  const st = a.settings || {};
+  const ac = accomOf_(stu);
+  return {
+    spell: st.spellcheck !== false,
+    lookup: st.lookup !== false,
+    tts: !!(ac.tts || st.ttsAll),
+    stt: !!(ac.stt || st.sttAll),
+    selfPaste: st.allowSelfPaste !== false
+  };
+}
+
+function publicAssignment_(a, stu) {
+  return { id: a.id, title: a.title, prompt: a.prompt || '', goal: goal_(a), tools: toolsFor_(a, stu), allowSelfPaste: (a.settings || {}).allowSelfPaste !== false };
+}
+
+function publicWork_(w) {
+  return {
+    status: w.status, words: w.words, chars: w.chars, rev: w.rev, locked: w.locked, lockReason: w.lockReason,
+    lockedAt: w.lockedAt, lastSaveAt: w.lastSaveAt, submittedAt: w.submittedAt, commentsAt: w.commentsAt
+  };
+}
+
+function gradeFor_(aid, sid) {
+  const g = findById_('grades', workKey_(aid, sid));
+  return g ? strip_(g) : null;
+}
+
+function rubricMax_(r) {
+  if (!r || !r.criteria) return 0;
+  const top = Math.max.apply(null, (r.levels || []).map(function (l) { return Number(l.points) || 0; }).concat([0]));
+  return r.criteria.reduce(function (s, c) { return s + top * (Number(c.weight) || 1); }, 0);
+}
+
+function rubricTotal_(r, scores) {
+  if (!r || !r.criteria || !scores) return 0;
+  let t = 0;
+  r.criteria.forEach(function (c) {
+    const i = scores[c.id];
+    if (i === undefined || i === null || i === '') return;
+    const lv = (r.levels || [])[Number(i)];
+    if (lv) t += (Number(lv.points) || 0) * (Number(c.weight) || 1);
+  });
+  return Math.round(t * 100) / 100;
+}
+
+function commentsFor_(aid, sid, includeDeleted) {
+  return readTable_('comments').filter(function (c) {
+    return c.aid === aid && c.sid === sid && (includeDeleted || !bool_(c.deleted));
+  }).map(function (c) {
+    const o = strip_(c);
+    o.resolved = bool_(c.resolved);
+    o.deleted = bool_(c.deleted);
+    o.offset = Number(c.offset) || 0;
+    o.created = Number(c.created) || 0;
+    o.resolvedAt = Number(c.resolvedAt) || 0;
+    return o;
+  }).sort(function (x, y) { return x.offset - y.offset || x.created - y.created; });
+}
+
+function studentComment_(c) {
+  return { id: c.id, quote: c.quote, prefix: c.prefix, suffix: c.suffix, offset: c.offset, text: c.text, created: c.created, resolved: c.resolved, resolvedAt: c.resolvedAt };
+}
+
+function feedbackFor_(a, sid) {
+  const st = a.settings || {};
+  if (!st.releaseFeedback) return null;
+  const g = gradeFor_(a.id, sid);
+  if (!g || !bool_(g.graded)) return null;
+  return { rubric: a.rubric || null, scores: g.scores || {}, comment: g.comment || '', total: Number(g.total) || 0, max: Number(g.max) || 0 };
 }
 
 /* ───────────────────────── Student API ───────────────────────── */
@@ -434,11 +628,6 @@ function ctx_(stu, aid) {
   return { a: a, cls: cls, win: windowFor_(a, cls, stu, Date.now()) };
 }
 
-function goal_(a) {
-  const st = a.settings || {};
-  return { min: Number(st.minWords) || 0, max: Number(st.maxWords) || 0, show: st.showGoal !== false };
-}
-
 function sHome(p) {
   const stu = studentFromToken_(p);
   const cls = findById_('classes', stu.classId);
@@ -454,13 +643,14 @@ function sHome(p) {
       const w = readWork_(row);
       work = { status: w.status, words: w.words, locked: w.locked, lastSaveAt: w.lastSaveAt, submittedAt: w.submittedAt };
     }
-    return { id: a.id, title: a.title, win: win, work: work, goal: goal_(a), created: a.created };
+    const open = commentsFor_(a.id, stu.id).filter(function (c) { return !c.resolved; }).length;
+    return { id: a.id, title: a.title, win: win, work: work, goal: goal_(a), tools: toolsFor_(a, stu), created: a.created, feedback: !!feedbackFor_(a, stu.id), openComments: open };
   });
   out.sort(function (x, y) {
     const rank = function (z) { return z.win.open ? 0 : (z.win.opensAt ? 1 : 2); };
     return rank(x) - rank(y) || (y.created || 0) - (x.created || 0);
   });
-  return { student: { id: stu.id, first: stu.first, last: stu.last, className: cls ? cls.name : '' }, assignments: out };
+  return { student: { id: stu.id, first: stu.first, last: stu.last, className: cls ? cls.name : '' }, absent: absentToday_(stu.id), assignments: out };
 }
 
 function lockWork_(row, w, reason, sessionId) {
@@ -473,14 +663,6 @@ function lockWork_(row, w, reason, sessionId) {
   logEvent_(w.aid, w.sid, 'locked', reason);
 }
 
-function publicAssignment_(a) {
-  const st = a.settings || {};
-  return {
-    id: a.id, title: a.title, prompt: a.prompt || '', goal: goal_(a),
-    allowSelfPaste: st.allowSelfPaste !== false
-  };
-}
-
 function sStart(p) {
   const stu = studentFromToken_(p);
   const c = ctx_(stu, p.aid);
@@ -488,9 +670,10 @@ function sStart(p) {
   let row = findWorkRow_(key);
   let w = row ? readWork_(row) : null;
   const base = {
-    assignment: publicAssignment_(c.a), win: c.win,
-    student: { first: stu.first, last: stu.last }, relaxed: !!(stu.accom && stu.accom.relaxed)
+    assignment: publicAssignment_(c.a, stu), win: c.win,
+    student: { first: stu.first, last: stu.last }, accom: accomOf_(stu)
   };
+  base.relaxed = base.assignment.tools.stt;
   if (w && w.status === 'submitted') {
     return Object.assign(base, { submitted: true, html: readDoc_(row).html, work: publicWork_(w) });
   }
@@ -516,24 +699,24 @@ function sStart(p) {
   }
   w.sessionId = p.sessionId;
   w.cleanExit = false;
+  w.sessions = (w.sessions || 0) + 1;
   if (!w.startedAt) w.startedAt = Date.now();
   writeMain_(row, w);
   heartbeat_(key, true);
   const doc = readDoc_(row);
-  return Object.assign(base, { html: doc.html, rev: w.rev, work: publicWork_(w), locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt });
-}
-
-function publicWork_(w) {
-  return {
-    status: w.status, words: w.words, chars: w.chars, rev: w.rev, locked: w.locked, lockReason: w.lockReason,
-    lockedAt: w.lockedAt, lastSaveAt: w.lastSaveAt, submittedAt: w.submittedAt
-  };
+  return Object.assign(base, {
+    html: doc.html, rev: w.rev, work: publicWork_(w), locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt,
+    comments: commentsFor_(p.aid, stu.id).map(studentComment_), cAt: w.commentsAt
+  });
 }
 
 function clampDelta_(d) {
   d = d || {};
   const n = function (v, max) { v = Math.round(Number(v) || 0); return Math.max(0, Math.min(v, max)); };
-  return { keys: n(d.keys, 20000), dels: n(d.dels, 20000), active: n(d.active, 600), paste: n(d.paste, 500), insert: n(d.insert, 500) };
+  return {
+    keys: n(d.keys, 20000), dels: n(d.dels, 20000), active: n(d.active, 600), open: n(d.open, 600), lockedS: n(d.lockedS, 600),
+    paste: n(d.paste, 500), insert: n(d.insert, 500), dict: n(d.dict, 20000), look: n(d.look, 200)
+  };
 }
 
 // Shared by save / lock / submit / exit.  Returns { row, w, saved }.
@@ -563,21 +746,23 @@ function applySave_(stu, p, opts) {
     // Integrity signals for the teacher
     const dw = w.words - prevWords;
     const dt = prevSave ? (now - prevSave) / 1000 : 999;
-    if (dw >= 60 && dt < 40) logEvent_(p.aid, stu.id, 'burst', '+' + dw + ' words in ' + Math.round(dt) + ' seconds');
+    if (dw >= 60 && dt < 40 && !d.dict) logEvent_(p.aid, stu.id, 'burst', '+' + dw + ' words in ' + Math.round(dt) + ' seconds');
     const dc = w.chars - prevChars;
-    if (dc > 120 && dc > d.keys * 1.6 + 40) {
+    if (dc > 120 && dc > d.keys * 1.6 + d.dict + 40) {
       logEvent_(p.aid, stu.id, 'unusual', dc + ' characters appeared with only ' + d.keys + ' keystrokes');
     }
     if (now - (w.lastRevAt || 0) >= 90000 || opts.forceRevision) {
       addRevision_(key, w.words, w.chars, p.html);
       w.lastRevAt = now;
     }
-  } else if (opts.forceRevision && w.rev > 0) {
-    // nothing new
   }
   w.keystrokes += d.keys;
   w.deletions += d.dels;
   w.activeSec += d.active;
+  w.openSec += d.open;
+  w.lockedSec += d.lockedS;
+  w.dictated += d.dict;
+  w.lookups += d.look;
   if (d.paste) { w.pasteBlocked += d.paste; logEvent_(p.aid, stu.id, 'paste', d.paste === 1 ? 'Tried to paste text from outside the assignment' : 'Tried to paste from outside the assignment (' + d.paste + ' times)'); }
   if (d.insert) { w.insertBlocked += d.insert; logEvent_(p.aid, stu.id, 'insert', 'A large block of text was inserted at once and blocked (autofill, AI writing tool, or dictation)'); }
   res.w = w;
@@ -585,7 +770,7 @@ function applySave_(stu, p, opts) {
 }
 
 function respond_(res, c) {
-  const out = { saved: !!res.saved, rev: res.w ? res.w.rev : 0, win: c ? c.win : null };
+  const out = { saved: !!res.saved, rev: res.w ? res.w.rev : 0, win: c ? c.win : null, cAt: res.w ? res.w.commentsAt : 0 };
   if (res.superseded) out.superseded = true;
   if (res.submitted) out.submitted = true;
   if (res.locked || (res.w && res.w.locked)) { out.locked = true; out.lockReason = res.w.lockReason; out.lockedAt = res.w.lockedAt; }
@@ -600,7 +785,7 @@ function sSave(p) {
     // Accept the last save that arrives just after class ends.
     const row0 = findWorkRow_(key);
     const w0 = row0 ? readWork_(row0) : null;
-    const recent = w0 && (Date.now() - Math.max(w0.lastSaveAt, w0.updated)) < 5 * 60000;
+    const recent = w0 && !c.win.absent && (Date.now() - Math.max(w0.lastSaveAt, w0.updated)) < 5 * 60000;
     if (!recent) return { saved: false, closed: true, win: c.win };
   }
   const res = applySave_(stu, p);
@@ -620,7 +805,7 @@ function sPing(p) {
   const w = readWork_(row);
   heartbeat_(key, p.focused !== false);
   const d = clampDelta_(p.d);
-  if (d.active || d.keys || d.paste || d.insert) {
+  if (d.active || d.keys || d.paste || d.insert || d.open || d.lockedS || d.look || d.dict) {
     if (!(w.sessionId && p.sessionId && w.sessionId !== p.sessionId) && w.status !== 'submitted') {
       const r = applySave_(stu, { aid: p.aid, sessionId: p.sessionId, d: p.d }, { allowLocked: true });
       writeMain_(row, r.w);
@@ -649,7 +834,12 @@ function sStatus(p) {
   if (!row) return { locked: false, win: c.win };
   const w = readWork_(row);
   heartbeat_(workKey_(p.aid, stu.id), false);
-  return { locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt, submitted: w.status === 'submitted', win: c.win, superseded: !!(w.sessionId && p.sessionId && w.sessionId !== p.sessionId) };
+  const d = clampDelta_(p.d);
+  if (d.lockedS && !(w.sessionId && p.sessionId && w.sessionId !== p.sessionId) && w.status !== 'submitted') {
+    w.lockedSec += d.lockedS;
+    writeMain_(row, w);
+  }
+  return { locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt, submitted: w.status === 'submitted', win: c.win, superseded: !!(w.sessionId && p.sessionId && w.sessionId !== p.sessionId), cAt: w.commentsAt };
 }
 
 function sSubmit(p) {
@@ -675,12 +865,44 @@ function sExit(p) {
   return { exited: true, saved: res.saved };
 }
 
+// Read-only copy of the student's own work (works even when the assignment is closed).
 function sView(p) {
   const stu = studentFromToken_(p);
-  const c = ctx_(stu, p.aid);
+  const a = findById_('assignments', p.aid);
+  if (!a || (a.classIds || []).indexOf(stu.classId) < 0 || (a.archived && !findWorkRow_(workKey_(p.aid, stu.id)))) throw err_('That assignment is not available.');
   const row = findWorkRow_(workKey_(p.aid, stu.id));
-  if (!row) return { html: '', work: null, assignment: publicAssignment_(c.a) };
-  return { html: readDoc_(row).html, work: publicWork_(readWork_(row)), assignment: publicAssignment_(c.a) };
+  const pa = publicAssignment_(a, stu);
+  if (!row) return { html: '', work: null, assignment: pa, comments: [], feedback: null };
+  const w = readWork_(row);
+  if (!p.quiet) {
+    w.viewCount = (w.viewCount || 0) + 1;
+    w.lastViewAt = Date.now();
+    writeView_(row, w);
+    logEvent_(p.aid, stu.id, 'view', 'Opened the read-only copy');
+  }
+  return {
+    html: readDoc_(row).html, work: publicWork_(w), assignment: pa,
+    comments: commentsFor_(p.aid, stu.id).map(studentComment_), feedback: feedbackFor_(a, stu.id)
+  };
+}
+
+function sComments(p) {
+  const stu = studentFromToken_(p);
+  const row = findWorkRow_(workKey_(p.aid, stu.id));
+  const w = row ? readWork_(row) : null;
+  return { comments: commentsFor_(p.aid, stu.id).map(studentComment_), cAt: w ? w.commentsAt : 0 };
+}
+
+function sResolveComment(p) {
+  const stu = studentFromToken_(p);
+  const c = findById_('comments', p.id);
+  if (!c || c.sid !== stu.id || bool_(c.deleted)) throw err_('That comment is gone.');
+  c.resolved = !!p.resolved;
+  c.resolvedAt = c.resolved ? Date.now() : 0;
+  c.updated = Date.now();
+  upsert_('comments', strip_(c));
+  touchComments_(c.aid, c.sid);
+  return { comment: studentComment_(Object.assign(strip_(c), { offset: Number(c.offset) || 0 })) };
 }
 
 /* ───────────────────────── Teacher API ───────────────────────── */
@@ -700,7 +922,8 @@ function tBoot(p) {
   teacher_(p);
   const now = Date.now();
   const classes = readTable_('classes');
-  const assignments = readTable_('assignments').filter(function (a) { return !a.archived; });
+  const all = readTable_('assignments');
+  const assignments = all.filter(function (a) { return !a.archived; }).map(strip_);
   assignments.forEach(function (a) {
     a.windows = {};
     (a.classIds || []).forEach(function (cid) {
@@ -708,8 +931,14 @@ function tBoot(p) {
       if (cls) a.windows[cid] = windowFor_(a, cls, null, now);
     });
   });
+  // Rubrics from every assignment (including archived) so they can be reused.
+  const rubricSources = all.filter(function (a) { return a.rubric && a.rubric.criteria && a.rubric.criteria.length; })
+    .map(function (a) { return { aid: a.id, title: a.title, archived: !!a.archived, rubric: a.rubric }; });
+  const t = today_();
   return {
-    classes: classes, students: readTable_('students'), assignments: assignments,
+    classes: classes.map(strip_), students: readTable_('students').map(strip_), assignments: assignments, rubricSources: rubricSources,
+    absentToday: readTable_('absences').filter(function (x) { return x.date === t; }).map(function (x) { return x.sid; }),
+    daysOff: daysOff_(), today: t,
     settings: { tz: tz_(), defaultPassword: !!PropertiesService.getScriptProperties().getProperty('PW_IS_DEFAULT'), version: APP.version }
   };
 }
@@ -736,8 +965,7 @@ function tDeleteClass(p) {
   readTable_('assignments').forEach(function (a) {
     if ((a.classIds || []).indexOf(p.id) >= 0) {
       a.classIds = a.classIds.filter(function (x) { return x !== p.id; });
-      delete a._row; delete a.windows;
-      upsert_('assignments', a);
+      upsert_('assignments', strip_(a));
     }
   });
   return {};
@@ -794,12 +1022,12 @@ function tSaveStudent(p) {
   if (!ex) throw err_('Student not found.');
   ex.first = String(s.first || ex.first).slice(0, 80);
   ex.last = String(s.last == null ? ex.last : s.last).slice(0, 80);
-  ex.accom = s.accom || {};
+  const ac = s.accom || {};
+  ex.accom = { extended: !!ac.extended, stt: !!(ac.stt || ac.relaxed), tts: !!ac.tts };
   ex.active = s.active !== false;
   if (s.classId && findById_('classes', s.classId)) ex.classId = s.classId;
-  delete ex._row;
-  upsert_('students', ex);
-  return { student: ex };
+  upsert_('students', strip_(ex));
+  return { student: strip_(ex) };
 }
 
 function tDeleteStudent(p) {
@@ -813,9 +1041,28 @@ function tRegenCode(p) {
   const ex = findById_('students', p.id);
   if (!ex) throw err_('Student not found.');
   ex.code = genCode_(takenCodes_());
-  delete ex._row;
-  upsert_('students', ex);
-  return { student: ex };
+  upsert_('students', strip_(ex));
+  return { student: strip_(ex) };
+}
+
+function cleanRubric_(r) {
+  if (!r || !r.criteria || !r.criteria.length) return '';
+  const s = function (v, n) { return String(v == null ? '' : v).slice(0, n); };
+  const levels = (r.levels || []).slice(0, 8).map(function (l) { return { label: s(l.label, 40), points: Math.max(0, Math.min(1000, Number(l.points) || 0)) }; });
+  if (!levels.length) return '';
+  const out = {
+    title: s(r.title, 120),
+    levels: levels,
+    criteria: r.criteria.slice(0, 20).map(function (c, i) {
+      return {
+        id: s(c.id || ('k' + i + Date.now().toString(36)), 24), name: s(c.name, 120), desc: s(c.desc, 500),
+        weight: Math.max(0.25, Math.min(10, Number(c.weight) || 1)),
+        cells: levels.map(function (l, j) { return s((c.cells || [])[j], 700); })
+      };
+    })
+  };
+  if (JSON.stringify(out).length > 45000) throw err_('That rubric is too long. Shorten some descriptions.');
+  return out;
 }
 
 function tSaveAssignment(p) {
@@ -838,14 +1085,29 @@ function tSaveAssignment(p) {
       showGoal: st.showGoal !== false,
       allowSelfPaste: st.allowSelfPaste !== false,
       lockOnReentry: st.lockOnReentry !== false,
+      spellcheck: st.spellcheck !== false,
+      lookup: st.lookup !== false,
+      ttsAll: !!st.ttsAll,
+      sttAll: !!st.sttAll,
+      releaseFeedback: !!st.releaseFeedback,
       hidden: !!st.hidden
     },
     override: ex ? ex.override : '',
+    rubric: a.rubric === undefined && ex ? ex.rubric : cleanRubric_(a.rubric),
     created: ex ? ex.created : Date.now(),
     updated: Date.now(),
     archived: false
   };
   upsert_('assignments', obj);
+  // Keep stored totals in step with an edited rubric.
+  if (ex && JSON.stringify(ex.rubric || '') !== JSON.stringify(obj.rubric || '')) {
+    readTable_('grades').filter(function (g) { return g.aid === obj.id; }).forEach(function (g) {
+      const ng = strip_(g);
+      ng.total = rubricTotal_(obj.rubric, g.scores);
+      ng.max = rubricMax_(obj.rubric);
+      upsert_('grades', ng);
+    });
+  }
   return { assignment: obj };
 }
 
@@ -854,8 +1116,7 @@ function tDeleteAssignment(p) {
   const ex = findById_('assignments', p.id);
   if (!ex) return {};
   ex.archived = true;
-  delete ex._row;
-  upsert_('assignments', ex);
+  upsert_('assignments', strip_(ex));
   return {};
 }
 
@@ -871,8 +1132,7 @@ function tOverride(p) {
   } else {
     ex.override = '';
   }
-  delete ex._row;
-  upsert_('assignments', ex);
+  upsert_('assignments', strip_(ex));
   const cls = readTable_('classes');
   const windows = {};
   (ex.classIds || []).forEach(function (cid) {
@@ -882,21 +1142,19 @@ function tOverride(p) {
   return { override: ex.override, windows: windows };
 }
 
-function readAllWork_(aid) {
+function readAllWork_(aid, sid) {
   const sh = sheet_('work');
   const last = sh.getLastRow();
   if (last < 2) return {};
   const vals = sh.getRange(2, 1, last - 1, WCOLS).getValues();
   const map = {};
-  const target = '~' + aid;
+  const ta = aid ? '~' + aid : null;
+  const ts = sid ? '~' + sid : null;
   vals.forEach(function (r, i) {
-    if (r[W.aid - 1] !== target) return;
-    const v = rowToObj_('work', r, i + 2);
-    ['words', 'chars', 'startedAt', 'lastSaveAt', 'submittedAt', 'keystrokes', 'deletions', 'activeSec', 'pasteBlocked',
-      'rev', 'lastRevAt', 'lockedAt', 'lockCount', 'insertBlocked', 'updated', 'unlockedAt'].forEach(function (k) { v[k] = Number(v[k]) || 0; });
-    v.locked = v.locked === true || v.locked === 'TRUE';
-    v.cleanExit = v.cleanExit === true || v.cleanExit === 'TRUE';
-    map[v.sid] = v;
+    if (ta && r[W.aid - 1] !== ta) return;
+    if (ts && r[W.sid - 1] !== ts) return;
+    const v = normWork_(rowToObj_('work', r, i + 2));
+    map[aid ? v.sid : v.aid] = v;
   });
   return map;
 }
@@ -905,7 +1163,7 @@ function recentEvents_(filter, limit) {
   const sh = sheet_('events');
   const last = sh.getLastRow();
   if (last < 2) return [];
-  const n = Math.min(last - 1, 600);
+  const n = Math.min(last - 1, 800);
   const vals = sh.getRange(last - n + 1, 1, n, SHEETS.events.length).getValues();
   const out = [];
   for (let i = vals.length - 1; i >= 0 && out.length < limit; i--) {
@@ -913,6 +1171,16 @@ function recentEvents_(filter, limit) {
     if (filter(e)) out.push({ ts: Number(e.ts), sid: e.sid, aid: e.aid, type: e.type, detail: e.detail });
   }
   return out;
+}
+
+function workSummary_(w) {
+  return {
+    words: w.words, chars: w.chars, startedAt: w.startedAt, lastSaveAt: w.lastSaveAt, submittedAt: w.submittedAt,
+    keystrokes: w.keystrokes, deletions: w.deletions, activeSec: w.activeSec, openSec: w.openSec, lockedSec: w.lockedSec,
+    dictated: w.dictated, lookups: w.lookups, sessions: w.sessions, pasteBlocked: w.pasteBlocked, insertBlocked: w.insertBlocked,
+    locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt, lockCount: w.lockCount, viewCount: w.viewCount, lastViewAt: w.lastViewAt,
+    status: w.status
+  };
 }
 
 function tMonitor(p) {
@@ -925,24 +1193,23 @@ function tMonitor(p) {
   const work = readAllWork_(a.id);
   const keys = students.map(function (s) { return 'hb:' + workKey_(a.id, s.id); });
   const hbs = keys.length ? cache_().getAll(keys) : {};
+  const openCount = {};
+  readTable_('comments').forEach(function (c) { if (c.aid === a.id && !bool_(c.deleted) && !bool_(c.resolved)) openCount[c.sid] = (openCount[c.sid] || 0) + 1; });
   const rows = students.map(function (s) {
     const w = work[s.id];
     const hbRaw = hbs['hb:' + workKey_(a.id, s.id)];
     const hb = hbRaw ? JSON.parse(hbRaw) : null;
-    const r = { sid: s.id, first: s.first, last: s.last, classId: s.classId, accom: s.accom || {} };
-    if (!w) { r.state = 'none'; return r; }
+    const absent = absentToday_(s.id);
+    const r = { sid: s.id, first: s.first, last: s.last, classId: s.classId, accom: accomOf_(s), absent: absent, openComments: openCount[s.id] || 0 };
+    if (!w) { r.state = absent ? 'absent' : 'none'; return r; }
     const online = !!(hb && now - hb.t < 45000);
     let state;
     if (w.status === 'submitted') state = 'submitted';
+    else if (absent) state = 'absent';
     else if (w.locked) state = 'locked';
     else if (online) state = (now - w.lastSaveAt < 75000) ? 'writing' : 'idle';
     else state = 'offline';
-    Object.assign(r, {
-      state: state, online: online, lastSeen: hb ? hb.t : 0, focused: hb ? !!hb.f : false,
-      words: w.words, chars: w.chars, startedAt: w.startedAt, lastSaveAt: w.lastSaveAt, submittedAt: w.submittedAt,
-      keystrokes: w.keystrokes, deletions: w.deletions, activeSec: w.activeSec, pasteBlocked: w.pasteBlocked,
-      insertBlocked: w.insertBlocked, locked: w.locked, lockReason: w.lockReason, lockedAt: w.lockedAt, lockCount: w.lockCount
-    });
+    Object.assign(r, workSummary_(w), { state: state, online: online, lastSeen: hb ? hb.t : 0, focused: hb ? !!hb.f : false });
     return r;
   });
   const windows = {};
@@ -950,7 +1217,7 @@ function tMonitor(p) {
   const sids = {};
   students.forEach(function (s) { sids[s.id] = 1; });
   const events = recentEvents_(function (e) { return e.aid === a.id && sids[e.sid]; }, 40);
-  return { assignment: a, windows: windows, rows: rows, events: events, demo: classes.some(function (c) { return c.demo; }) };
+  return { assignment: strip_(a), windows: windows, rows: rows, events: events, demo: classes.some(function (c) { return c.demo; }) };
 }
 
 function tWork(p) {
@@ -958,10 +1225,11 @@ function tWork(p) {
   const key = workKey_(p.aid, p.sid);
   const row = findWorkRow_(key);
   const stu = findById_('students', p.sid);
-  if (!row) return { work: null, html: '', revisions: [], events: [], student: stu };
+  const base = { student: stu ? strip_(stu) : null, grade: gradeFor_(p.aid, p.sid), comments: commentsFor_(p.aid, p.sid), absent: absentToday_(p.sid) };
+  if (!row) return Object.assign(base, { work: null, html: '', revisions: [], events: [] });
   const w = readWork_(row);
   const doc = readDoc_(row);
-  const out = { work: w, html: doc.html, student: stu };
+  const out = Object.assign(base, { work: strip_(w), html: doc.html });
   if (!p.light) {
     const sh = sheet_('revisions');
     const last = sh.getLastRow();
@@ -1038,10 +1306,11 @@ function tExport(p) {
     return {
       sid: s.id, first: s.first, last: s.last, className: cls[s.classId] || '',
       status: w ? w.status : 'none', words: w ? w.words : 0, submittedAt: w ? w.submittedAt : 0,
-      html: w ? readDoc_(w._row).html : ''
+      html: w ? readDoc_(w._row).html : '', grade: gradeFor_(a.id, s.id),
+      comments: p.withComments ? commentsFor_(a.id, s.id) : []
     };
   });
-  return { assignment: a, items: items };
+  return { assignment: strip_(a), items: items };
 }
 
 function tPassword(p) {
@@ -1053,6 +1322,156 @@ function tPassword(p) {
   return { token: sign_({ r: 't', pv: pwVersion_(), exp: Date.now() + 30 * 24 * 3600 * 1000 }) };
 }
 
+/* ── Attendance & calendar ── */
+
+function tSetAbsent(p) {
+  teacher_(p);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(p.date || '') ? p.date : today_();
+  const sids = (p.sids || (p.sid ? [p.sid] : [])).filter(function (s) { return findById_('students', s); });
+  const absent = p.absent !== false;
+  sids.forEach(function (sid) {
+    const key = date + '|' + sid;
+    const ex = findById_('absences', key);
+    if (absent && !ex) {
+      upsert_('absences', { key: key, date: date, sid: sid, created: Date.now() });
+      readTable_('assignments').forEach(function (a) {
+        const stu = findById_('students', sid);
+        if (!a.archived && stu && (a.classIds || []).indexOf(stu.classId) >= 0 && findWorkRow_(workKey_(a.id, sid)) && date === today_()) logEvent_(a.id, sid, 'absent', 'Marked absent for ' + date);
+      });
+    } else if (!absent && ex) {
+      deleteRowsWhere_('absences', function (x) { return x.key === key; });
+    }
+  });
+  REQ.absent = null;
+  const t = today_();
+  return { absentToday: readTable_('absences').filter(function (x) { return x.date === t; }).map(function (x) { return x.sid; }) };
+}
+
+function tSetDaysOff(p) {
+  teacher_(p);
+  const m = {};
+  Object.keys(p.daysOff || {}).forEach(function (d) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) m[d] = String(p.daysOff[d] || 'Day off').slice(0, 40);
+  });
+  const s = JSON.stringify(m);
+  if (s.length > 8500) throw err_('That is too many days off to store. Remove some from past years.');
+  PropertiesService.getScriptProperties().setProperty('DAYS_OFF', s);
+  REQ.daysOff = null;
+  return { daysOff: m };
+}
+
+/* ── Inline comments ── */
+
+function tAddComment(p) {
+  teacher_(p);
+  const c = p.comment || {};
+  const a = findById_('assignments', p.aid);
+  if (!a) throw err_('Assignment not found.');
+  if (!findWorkRow_(workKey_(p.aid, p.sid))) throw err_('This student has not written anything yet.');
+  const text = String(c.text || '').trim();
+  if (!text) throw err_('Write a comment first.');
+  const obj = {
+    id: newId_('m'), key: workKey_(p.aid, p.sid), aid: p.aid, sid: p.sid,
+    quote: String(c.quote || '').slice(0, 1000), prefix: String(c.prefix || '').slice(-64), suffix: String(c.suffix || '').slice(0, 64),
+    offset: Math.max(0, Number(c.offset) || 0), text: text.slice(0, 2000), created: Date.now(), updated: Date.now(),
+    resolved: false, resolvedAt: 0, deleted: false
+  };
+  upsert_('comments', obj);
+  touchComments_(p.aid, p.sid);
+  return { comment: obj, comments: commentsFor_(p.aid, p.sid) };
+}
+
+function tEditComment(p) {
+  teacher_(p);
+  const c = findById_('comments', p.id);
+  if (!c) throw err_('Comment not found.');
+  if (typeof p.text === 'string' && p.text.trim()) c.text = p.text.trim().slice(0, 2000);
+  if (p.reopen) { c.resolved = false; c.resolvedAt = 0; }
+  c.updated = Date.now();
+  upsert_('comments', strip_(c));
+  touchComments_(c.aid, c.sid);
+  return { comments: commentsFor_(c.aid, c.sid) };
+}
+
+function tDeleteComment(p) {
+  teacher_(p);
+  const c = findById_('comments', p.id);
+  if (!c) return {};
+  c.deleted = true;
+  c.updated = Date.now();
+  upsert_('comments', strip_(c));
+  touchComments_(c.aid, c.sid);
+  return { comments: commentsFor_(c.aid, c.sid) };
+}
+
+/* ── Grading ── */
+
+function tSaveGrade(p) {
+  teacher_(p);
+  const a = findById_('assignments', p.aid);
+  if (!a) throw err_('Assignment not found.');
+  if (!findById_('students', p.sid)) throw err_('Student not found.');
+  const key = workKey_(p.aid, p.sid);
+  const ex = findById_('grades', key);
+  const scores = {};
+  Object.keys(p.scores || {}).forEach(function (k) {
+    const v = p.scores[k];
+    if (v !== null && v !== '' && v !== undefined && !isNaN(Number(v))) scores[String(k).slice(0, 24)] = Number(v);
+  });
+  const g = {
+    key: key, aid: p.aid, sid: p.sid, scores: scores,
+    comment: String(p.comment == null ? (ex ? ex.comment : '') : p.comment).slice(0, 20000),
+    total: rubricTotal_(a.rubric, scores), max: rubricMax_(a.rubric),
+    graded: p.graded === undefined ? (ex ? bool_(ex.graded) : false) : !!p.graded,
+    updated: Date.now()
+  };
+  upsert_('grades', g);
+  return { grade: g };
+}
+
+function tGradeBoard(p) {
+  teacher_(p);
+  const a = findById_('assignments', p.aid);
+  if (!a) throw err_('Assignment not found.');
+  const students = readTable_('students').filter(function (s) { return s.active !== false && (a.classIds || []).indexOf(s.classId) >= 0; });
+  const work = readAllWork_(a.id);
+  const grades = {};
+  readTable_('grades').forEach(function (g) { if (g.aid === a.id) grades[g.sid] = strip_(g); });
+  const rows = students.map(function (s) {
+    const w = work[s.id];
+    const g = grades[s.id];
+    return {
+      sid: s.id, first: s.first, last: s.last, classId: s.classId, status: w ? w.status : 'none', words: w ? w.words : 0,
+      submittedAt: w ? w.submittedAt : 0, graded: g ? bool_(g.graded) : false, total: g ? Number(g.total) || 0 : null,
+      max: g ? Number(g.max) || 0 : rubricMax_(a.rubric), started: !!w
+    };
+  });
+  return { assignment: strip_(a), rows: rows };
+}
+
+/* ── Per-student record ── */
+
+function tRecord(p) {
+  teacher_(p);
+  const stu = findById_('students', p.sid);
+  if (!stu) throw err_('Student not found.');
+  const cls = findById_('classes', stu.classId);
+  const work = readAllWork_(null, stu.id);
+  const list = readTable_('assignments').filter(function (a) {
+    return work[a.id] || (!a.archived && (a.classIds || []).indexOf(stu.classId) >= 0);
+  }).sort(function (x, y) { return (x.created || 0) - (y.created || 0); });
+  const items = list.map(function (a) {
+    const w = work[a.id];
+    return {
+      assignment: { id: a.id, title: a.title, prompt: a.prompt, rubric: a.rubric, settings: a.settings, created: a.created, archived: !!a.archived },
+      work: w ? workSummary_(w) : null, html: w ? readDoc_(w._row).html : '',
+      grade: gradeFor_(a.id, stu.id), comments: w ? commentsFor_(a.id, stu.id) : []
+    };
+  });
+  const absences = readTable_('absences').filter(function (x) { return x.sid === stu.id; }).map(function (x) { return x.date; }).sort();
+  return { student: strip_(stu), className: cls ? cls.name : '', items: items, absences: absences };
+}
+
 /* ───────────────────────── Demo data ───────────────────────── */
 
 function tDemoSeed(p) { teacher_(p); tDemoClearInner_(); demoSeed_(); return tBoot(p); }
@@ -1061,11 +1480,14 @@ function tDemoClear(p) { teacher_(p); tDemoClearInner_(); return tBoot(p); }
 function tDemoClearInner_() {
   const demoIds = readTable_('classes').filter(function (c) { return c.demo; }).map(function (c) { return c.id; });
   if (!demoIds.length) return;
+  const demoStudents = {};
+  readTable_('students').forEach(function (s) { if (demoIds.indexOf(s.classId) >= 0) demoStudents[s.id] = 1; });
   deleteRowsWhere_('students', function (s) { return demoIds.indexOf(s.classId) >= 0; });
   deleteRowsWhere_('classes', function (c) { return c.demo; });
+  deleteRowsWhere_('absences', function (x) { return demoStudents[x.sid]; });
   readTable_('assignments').forEach(function (a) {
     if ((a.classIds || []).some(function (id) { return demoIds.indexOf(id) >= 0; })) {
-      a.archived = true; delete a._row; upsert_('assignments', a);
+      a.archived = true; upsert_('assignments', strip_(a));
     }
   });
 }
@@ -1129,6 +1551,43 @@ const DEMO_STUDENTS_B = [
   ['Kai', 'Tanaka'], ['Nora', 'Lindqvist'], ['Ryan', 'Castillo']
 ];
 
+/* Pre-built rubrics (also offered as templates in the teacher's rubric editor). */
+const LEVELS5 = [
+  { label: 'Excellent', points: 5 }, { label: 'Proficient', points: 4 }, { label: 'Satisfactory', points: 3 },
+  { label: 'Limited', points: 2 }, { label: 'Insufficient', points: 1 }
+];
+function demoRubricNarrative_() {
+  return {
+    title: 'Personal Narrative', levels: LEVELS5, criteria: [
+      { id: 'focus', name: 'Focus & Purpose', desc: 'Centres on one meaningful moment', weight: 1, cells: [
+        'Insightfully centred on a single moment; significance is clear and compelling.', 'Clearly focused on one moment; significance is evident.',
+        'Generally focused; significance is stated but somewhat general.', 'Focus wanders; significance is unclear.', 'No clear focus or purpose.'] },
+      { id: 'detail', name: 'Details & Description', desc: 'Sensory detail, dialogue, showing', weight: 1, cells: [
+        'Vivid, precise sensory details and purposeful dialogue bring the moment to life.', 'Effective details and dialogue support the narrative.',
+        'Some relevant details; telling more than showing.', 'Few or vague details.', 'Details are missing or irrelevant.'] },
+      { id: 'org', name: 'Organization', desc: 'Sequence, pacing, transitions', weight: 1, cells: [
+        'Purposeful structure and pacing build to a resonant ending.', 'Logical sequence with smooth transitions and a clear ending.',
+        'Mostly logical sequence; transitions are basic.', 'Sequence is hard to follow.', 'No discernible structure.'] },
+      { id: 'reflect', name: 'Reflection', desc: 'Shows how the writer changed', weight: 1, cells: [
+        'Reflection is thoughtful and original, revealing genuine insight.', 'Reflection clearly explains the change and why it matters.',
+        'Reflection is present but general.', 'Reflection is minimal or tacked on.', 'No reflection.'] },
+      { id: 'conv', name: 'Conventions', desc: 'Spelling, punctuation, grammar', weight: 1, cells: [
+        'Virtually error-free; conventions enhance meaning.', 'Few errors; none interfere with meaning.',
+        'Some errors; meaning remains clear.', 'Frequent errors interfere with meaning.', 'Errors make the writing difficult to understand.'] }
+    ]
+  };
+}
+function demoRubricQuick_() {
+  return {
+    title: 'Quickwrite', levels: [{ label: 'Strong', points: 3 }, { label: 'Developing', points: 2 }, { label: 'Beginning', points: 1 }],
+    criteria: [
+      { id: 'pos', name: 'Clear position', desc: '', weight: 1, cells: ['States a clear, thoughtful position.', 'Position is present but vague.', 'No clear position.'] },
+      { id: 'sup', name: 'Support', desc: '', weight: 2, cells: ['Specific, convincing reasons and examples.', 'Some support; examples are general.', 'Little or no support.'] },
+      { id: 'cl', name: 'Clarity', desc: '', weight: 1, cells: ['Clear and well organized.', 'Mostly clear.', 'Hard to follow.'] }
+    ]
+  };
+}
+
 function essayHtml_(e, paraCount, partialFrac) {
   let html = '<h1>' + e.title + '</h1>';
   for (let i = 0; i < paraCount && i < e.paras.length; i++) {
@@ -1151,6 +1610,15 @@ function countChars_(html) {
   return String(html).replace(/<\/(p|h1|h2|li|blockquote)>/g, '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').length;
 }
 
+// Builds a comment anchored to the first occurrence of `quote` in the html's text.
+function demoComment_(aid, sid, html, quote, text, resolved, t) {
+  const plain = String(html).replace(/<\/(p|h1|h2|h3|li|blockquote|div)>/g, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/\n$/, '');
+  const i = plain.indexOf(quote);
+  if (i < 0) return null;
+  return [enc_(newId_('m')), enc_(workKey_(aid, sid)), enc_(aid), enc_(sid), enc_(quote), enc_(plain.slice(Math.max(0, i - 32), i)),
+    enc_(plain.slice(i + quote.length, i + quote.length + 32)), i, enc_(text), t, t, !!resolved, resolved ? t + 600000 : 0, false];
+}
+
 function demoSeed_() {
   const now = Date.now();
   const weekdayPeriods = function (s, e, fs, fe) {
@@ -1166,7 +1634,11 @@ function demoSeed_() {
     return list.map(function (n, i) {
       const code = n[2] || genCode_(taken);
       taken[normCode_(code)] = 1;
-      return { id: newId_('s'), classId: cls.id, first: n[0], last: n[1], code: code, accom: (n[0] === 'Owen' ? { extended: true } : {}), active: true, created: now + i };
+      let accom = {};
+      if (n[0] === 'Owen') accom = { extended: true };
+      if (n[0] === 'Noah') accom = { tts: true, stt: true };
+      if (n[0] === 'Test') accom = { tts: true, stt: true };
+      return { id: newId_('s'), classId: cls.id, first: n[0], last: n[1], code: code, accom: accom, active: true, created: now + i };
     });
   };
   const studentsA = mk(clsA, DEMO_STUDENTS_A);
@@ -1177,44 +1649,50 @@ function demoSeed_() {
   clearTableCache_('students');
 
   const today = localParts_(now).date;
+  const baseSettings = { graceMin: 0, showGoal: true, allowSelfPaste: true, lockOnReentry: true, spellcheck: true, lookup: true, ttsAll: false, sttAll: false, releaseFeedback: false, hidden: false };
   const a1 = {
     id: newId_('a'), classIds: [clsA.id], title: 'Personal Narrative: A Moment That Changed Me',
     prompt: '<p>Write a personal narrative about a specific moment or experience that changed the way you see yourself, another person, or the world.</p>' +
       '<p><b>Your narrative should:</b></p><ul><li>Focus on <i>one</i> moment, not your whole life story</li><li>Use vivid sensory details and dialogue where it fits</li><li>Show (don\'t just tell) how you changed</li><li>End with a reflection on why this moment still matters</li></ul>' +
       '<p>Give your piece a title. Aim for 500–800 words.</p>',
-    settings: { openMode: 'always', startDate: '', endDate: '', graceMin: 0, minWords: 500, maxWords: 800, showGoal: true, allowSelfPaste: true, lockOnReentry: true },
-    override: '', created: now, updated: now, archived: false
+    settings: Object.assign({}, baseSettings, { openMode: 'always', startDate: '', endDate: '', minWords: 500, maxWords: 800 }),
+    override: '', rubric: demoRubricNarrative_(), created: now, updated: now, archived: false
   };
   const a2 = {
     id: newId_('a'), classIds: [clsA.id, clsB.id], title: 'Literary Response: Conflict in "The Lottery"',
     prompt: '<p>In a well-organized literary response, explain how Shirley Jackson uses <b>conflict</b> to develop a theme in "The Lottery."</p>' +
       '<p>Support your thesis with at least <b>three</b> pieces of textual evidence, and explain how each one connects to your theme.</p>',
-    settings: { openMode: 'class', startDate: today, endDate: '', graceMin: 0, minWords: 400, maxWords: 0, showGoal: true, allowSelfPaste: true, lockOnReentry: true },
-    override: '', created: now - 1000, updated: now, archived: false
+    settings: Object.assign({}, baseSettings, { openMode: 'class', startDate: today, endDate: '', minWords: 400, maxWords: 0 }),
+    override: '', rubric: '', created: now - 1000, updated: now, archived: false
   };
   const a3 = {
     id: newId_('a'), classIds: [clsA.id], title: 'Quickwrite: Is Social Media Making Us Lonelier?',
     prompt: '<p>Take a position: is social media making teenagers lonelier? Explain your thinking in one strong paragraph.</p>',
-    settings: { openMode: 'class', startDate: addDays_(today, -7), endDate: addDays_(today, -1), graceMin: 0, minWords: 100, maxWords: 250, showGoal: true, allowSelfPaste: true, lockOnReentry: true },
-    override: '', created: now - 7 * 86400000, updated: now, archived: false
+    settings: Object.assign({}, baseSettings, { openMode: 'class', startDate: addDays_(today, -7), endDate: addDays_(today, -1), minWords: 100, maxWords: 250, releaseFeedback: true }),
+    override: '', rubric: demoRubricQuick_(), created: now - 7 * 86400000, updated: now, archived: false
   };
   [a1, a2, a3].forEach(function (a) { upsert_('assignments', a); });
 
-  // ── Work for the live narrative (a1): a class in progress ──
-  const plan = [
-    // [studentIndex, essayIndex, paras, frac, state]
-    [1, 0, 3, 0.6, 'writing'], [2, 1, 2, 0.4, 'writing'], [3, 2, 4, 0.7, 'locked'], [4, 3, 2, 0.9, 'writing'],
-    [5, 4, 5, 1, 'submitted'], [6, 0, 1, 0.8, 'idle'], [7, 1, 3, 0.2, 'writing'], [8, 2, 1, 0.5, 'locked2'],
-    [9, 3, 4, 0.5, 'writing'], [10, 4, 2, 0.3, 'writing'], [11, 1, 5, 1, 'submitted']
-    // 12, 13, 14 not started; 0 (Test Student) untouched
-  ];
   const wsh = sheet_('work');
   const dsh = sheet_('docs');
   const workRows = [];
   const docRows = [];
   const revRows = [];
   const evRows = [];
+  const gradeRows = [];
+  const cmtRows = [];
+  const essays = {};
   let row = Math.max(wsh.getLastRow(), dsh.getLastRow(), 1) + 1;
+  const mkWork = function (o) { const w = blankWork_(o.aid, o.sid, now); return Object.assign(w, o); };
+
+  // ── Live narrative (a1): a class in progress ──
+  const plan = [
+    // [studentIndex, essayIndex, paras, frac, state]
+    [1, 0, 3, 0.6, 'writing'], [2, 1, 2, 0.4, 'writing'], [3, 2, 4, 0.7, 'locked'], [4, 3, 2, 0.9, 'writing'],
+    [5, 4, 5, 1, 'submitted'], [6, 0, 1, 0.8, 'idle'], [7, 1, 3, 0.2, 'writing'], [8, 2, 1, 0.5, 'locked2'],
+    [9, 3, 4, 0.5, 'writing'], [10, 4, 2, 0.3, 'writing'], [11, 1, 5, 1, 'submitted']
+    // 12, 13 not started; 14 (Mateo) absent; 0 (Test Student) untouched
+  ];
   const startT = now - 38 * 60000;
   plan.forEach(function (pl) {
     const s = studentsA[pl[0]];
@@ -1225,20 +1703,23 @@ function demoSeed_() {
     const started = startT + Math.floor(Math.random() * 4 * 60000);
     const state = pl[4];
     const lastSave = state === 'idle' ? now - 4 * 60000 : now - Math.floor(Math.random() * 25000);
-    const w = {
+    const openSec = Math.round((lastSave - started) / 1000);
+    const activeSec = Math.round(openSec * (0.55 + Math.random() * 0.3));
+    const w = mkWork({
       key: key, aid: a1.id, sid: s.id, status: state === 'submitted' ? 'submitted' : 'draft', words: words, chars: countChars_(html),
       startedAt: started, lastSaveAt: lastSave, submittedAt: state === 'submitted' ? now - 3 * 60000 : 0,
       keystrokes: Math.round(countChars_(html) * (1.15 + Math.random() * 0.3)), deletions: Math.round(words * (0.6 + Math.random())),
-      activeSec: Math.round((lastSave - started) / 1000 * (0.75 + Math.random() * 0.2)), pasteBlocked: pl[0] === 8 ? 2 : 0,
-      rev: 40 + Math.floor(Math.random() * 200), sessionId: 'demo-' + s.id, lastRevAt: lastSave, cleanExit: state === 'submitted',
-      insertBlocked: 0, updated: lastSave, locked: state === 'locked' || state === 'locked2',
+      activeSec: activeSec, openSec: openSec, lockedSec: state.indexOf('locked') === 0 ? 70 : (pl[0] === 8 ? 120 : 0), sessions: 1 + (pl[0] % 3 === 0 ? 1 : 0),
+      lookups: pl[0] % 4, dictated: s.accom && s.accom.stt ? 180 : 0,
+      pasteBlocked: pl[0] === 8 ? 2 : 0, rev: 40 + Math.floor(Math.random() * 200), sessionId: 'demo-' + s.id, lastRevAt: lastSave,
+      cleanExit: state === 'submitted', updated: lastSave, locked: state === 'locked' || state === 'locked2',
       lockReason: state === 'locked' ? 'Switched tabs or minimized the window' : (state === 'locked2' ? 'Exited full screen' : ''),
       lockedAt: state.indexOf('locked') === 0 ? now - Math.floor(30000 + Math.random() * 60000) : 0,
-      lockCount: state.indexOf('locked') === 0 ? (pl[0] === 8 ? 2 : 1) : 0, unlockedAt: 0, lockSession: ''
-    };
+      lockCount: state.indexOf('locked') === 0 ? (pl[0] === 8 ? 2 : 1) : 0
+    });
+    essays[key] = html;
     workRows.push(objToRow_('work', w));
     docRows.push(objToRow_('docs', { key: key, rev: w.rev, updated: lastSave, c1: html, c2: '', c3: '', c4: '', c5: '' }));
-    // Revisions: roughly every 2.5 minutes from start to now, growing the essay.
     const totalParas = pl[2];
     const steps = Math.max(2, Math.round((lastSave - started) / 150000));
     for (let k = 1; k <= steps; k++) {
@@ -1261,25 +1742,56 @@ function demoSeed_() {
     if (state === 'submitted') evRows.push([w.submittedAt, enc_(key), enc_(a1.id), enc_(s.id), enc_('submit'), enc_('Submitted (' + words + ' words)')]);
     if (state !== 'submitted') heartbeat_(key, state !== 'locked' && state !== 'locked2');
   });
+  // A couple of live inline comments on the narrative.
+  const maya = studentsA[5], ava = studentsA[1], hannah = studentsA[11];
+  [[ava, 'the trees outside cracked like gunshots', 'Great simile — keep this kind of sensory detail coming.', false],
+    [ava, 'we did not know what to do with ourselves at first', 'Could you show this with an action instead of telling us?', false],
+    [maya, 'I felt like I was disappearing from my old life without arriving in my new one', 'This line is the heart of your piece. Lovely.', true]].forEach(function (c, i) {
+    const r = demoComment_(a1.id, c[0].id, essays[workKey_(a1.id, c[0].id)], c[1], c[2], c[3], now - (10 - i) * 60000);
+    if (r) cmtRows.push(r);
+  });
+  // Maya and Hannah submitted → graded (feedback not released yet on this one).
+  [[maya, { focus: 0, detail: 1, org: 0, reflect: 1, conv: 1 }, 'Beautifully structured. The pencil-mark image at the start and end ties everything together.', true],
+    [hannah, { focus: 1, detail: 2, org: 1, reflect: 2 }, '', false]].forEach(function (g) {
+    const r = demoRubricNarrative_();
+    gradeRows.push(objToRow_('grades', { key: workKey_(a1.id, g[0].id), aid: a1.id, sid: g[0].id, scores: g[1], comment: g[2], total: rubricTotal_(r, g[1]), max: rubricMax_(r), graded: g[3], updated: now }));
+  });
 
-  // ── Finished quickwrite (a3): everyone except two submitted ──
-  studentsA.slice(1).forEach(function (s, i) {
-    if (i === 6 || i === 12) return;
-    const text = DEMO_QUICKWRITES[i % DEMO_QUICKWRITES.length];
+  // ── Finished quickwrite (a3): graded and released ──
+  const qwStudents = studentsA.slice(0);
+  qwStudents.forEach(function (s, i) {
+    if (i === 7 || i === 13) return;
+    const text = i === 0 ? 'I think social media is making us lonelier, but not for the reason most adults think. The problem is not the screens, it is that we use them to watch other people live instead of living ourselves. When I spend an hour scrolling I come away feeling like everyone else is having more fun than me. When I use the same phone to call my best friend, I feel more connected than ever. So the tool is not the problem. The habit is.'
+      : DEMO_QUICKWRITES[(i - 1) % DEMO_QUICKWRITES.length];
     const html = '<p class="fi">' + text + '</p>';
     const key = workKey_(a3.id, s.id);
     const t = now - 2 * 86400000 + i * 60000;
     const words = countWords_(html);
-    const w = {
-      key: key, aid: a3.id, sid: s.id, status: i === 9 ? 'draft' : 'submitted', words: words, chars: countChars_(html), startedAt: t - 15 * 60000,
-      lastSaveAt: t, submittedAt: i === 9 ? 0 : t, keystrokes: Math.round(countChars_(html) * 1.2), deletions: Math.round(words * 0.8),
-      activeSec: 600 + i * 20, pasteBlocked: 0, rev: 30, sessionId: 'demo-' + s.id, lastRevAt: t, cleanExit: true, insertBlocked: 0, updated: t,
-      locked: false, lockReason: '', lockedAt: 0, lockCount: 0, unlockedAt: 0, lockSession: ''
-    };
+    const draft = i === 10;
+    const w = mkWork({
+      key: key, aid: a3.id, sid: s.id, status: draft ? 'draft' : 'submitted', words: words, chars: countChars_(html), startedAt: t - 15 * 60000,
+      lastSaveAt: t, submittedAt: draft ? 0 : t, keystrokes: Math.round(countChars_(html) * 1.2), deletions: Math.round(words * 0.8),
+      activeSec: 420 + i * 15, openSec: 900, sessions: 1, rev: 30, sessionId: 'demo-' + s.id, lastRevAt: t, cleanExit: true, updated: t,
+      viewCount: i === 2 ? 2 : 0, lastViewAt: i === 2 ? now - 3600000 : 0
+    });
     workRows.push(objToRow_('work', w));
     docRows.push(objToRow_('docs', { key: key, rev: 30, updated: t, c1: html, c2: '', c3: '', c4: '', c5: '' }));
     revRows.push([enc_(key), t, words, countChars_(html), enc_(html), '', '']);
-    evRows.push([t, enc_(key), enc_(a3.id), enc_(s.id), enc_(i === 9 ? 'exit' : 'submit'), enc_(i === 9 ? 'Class ended before submitting' : 'Submitted (' + words + ' words)')]);
+    evRows.push([t, enc_(key), enc_(a3.id), enc_(s.id), enc_(draft ? 'exit' : 'submit'), enc_(draft ? 'Class ended before submitting' : 'Submitted (' + words + ' words)')]);
+    if (!draft) {
+      const sc = i === 0 ? { pos: 0, sup: 1, cl: 0 } : { pos: i % 3 === 0 ? 1 : 0, sup: i % 2, cl: i % 4 === 0 ? 1 : 0 };
+      const rq = demoRubricQuick_();
+      gradeRows.push(objToRow_('grades', {
+        key: key, aid: a3.id, sid: s.id, scores: sc, total: rubricTotal_(rq, sc), max: rubricMax_(rq), graded: true, updated: t + 86400000,
+        comment: i === 0 ? 'Strong, original position — "the tool is not the problem, the habit is" is a great closing line. Next time, add one specific example to support your second point.' : 'Clear position. Push yourself to add a specific example.'
+      }));
+    }
+    if (i === 0) {
+      const r1 = demoComment_(a3.id, s.id, html, 'watch other people live instead of living ourselves', 'This is a sharp insight. Could you give an example from your own life?', false, t + 86400000);
+      const r2 = demoComment_(a3.id, s.id, html, 'The habit is.', 'Great punchy ending.', false, t + 86400000 + 1000);
+      if (r1) cmtRows.push(r1);
+      if (r2) cmtRows.push(r2);
+    }
   });
 
   withLock_(function () {
@@ -1289,15 +1801,18 @@ function demoSeed_() {
     }
   });
   workRows.forEach(function (r, i) { cache_().put('wr:' + dec_(r[0]), String(row + i), 21600); });
-  if (revRows.length) {
-    const rsh = sheet_('revisions');
-    rsh.getRange(Math.max(rsh.getLastRow(), 1) + 1, 1, revRows.length, SHEETS.revisions.length).setValues(revRows);
-  }
-  if (evRows.length) {
-    evRows.sort(function (x, y) { return x[0] - y[0]; });
-    const esh = sheet_('events');
-    esh.getRange(Math.max(esh.getLastRow(), 1) + 1, 1, evRows.length, SHEETS.events.length).setValues(evRows);
-  }
+  const app = function (name, rows) {
+    if (!rows.length) return;
+    const sh = sheet_(name);
+    sh.getRange(Math.max(sh.getLastRow(), 1) + 1, 1, rows.length, SHEETS[name].length).setValues(rows);
+  };
+  app('revisions', revRows);
+  evRows.sort(function (x, y) { return x[0] - y[0]; });
+  app('events', evRows);
+  app('grades', gradeRows);
+  app('comments', cmtRows);
+  // Mateo is away today.
+  app('absences', [objToRow_('absences', { key: today + '|' + studentsA[14].id, date: today, sid: studentsA[14].id, created: now })]);
   clearTableCache_();
 }
 
@@ -1311,7 +1826,7 @@ function tDemoTick(p) {
   if (!a) throw err_('Assignment not found.');
   const demoClassIds = readTable_('classes').filter(function (c) { return c.demo && (a.classIds || []).indexOf(c.id) >= 0; }).map(function (c) { return c.id; });
   if (!demoClassIds.length) return { ticked: 0 };
-  const students = readTable_('students').filter(function (s) { return demoClassIds.indexOf(s.classId) >= 0 && s.code !== 'TEST-0001'; });
+  const students = readTable_('students').filter(function (s) { return demoClassIds.indexOf(s.classId) >= 0 && s.code !== 'TEST-0001' && !absentToday_(s.id); });
   const work = readAllWork_(a.id);
   const now = Date.now();
   let ticked = 0;
@@ -1328,7 +1843,7 @@ function tDemoTick(p) {
       if (Math.random() < 0.12) {
         const row = createWork_(a.id, s.id);
         const nw = readWork_(row);
-        nw.sessionId = 'demo-' + s.id; nw.cleanExit = false; nw.startedAt = now;
+        nw.sessionId = 'demo-' + s.id; nw.cleanExit = false; nw.startedAt = now; nw.sessions = 1;
         const html = '<h1>' + essay.title + '</h1>';
         writeDoc_(row, key, 1, html); nw.rev = 1; nw.words = countWords_(html); nw.chars = countChars_(html); nw.lastSaveAt = now;
         writeMain_(row, nw);
@@ -1339,17 +1854,18 @@ function tDemoTick(p) {
       return;
     }
     if (w.status === 'submitted') return;
-    if (w.locked) { heartbeat_(key, false); return; }
-    heartbeat_(key, true);
-    if (Math.random() < 0.25) return; // thinking / idle this tick
     const row = w._row;
+    if (w.locked) { heartbeat_(key, false); w.lockedSec += 5; writeMain_(row, w); return; }
+    heartbeat_(key, true);
+    w.openSec += 5;
+    if (Math.random() < 0.25) { writeMain_(row, w); return; } // thinking / idle this tick
     if (Math.random() < 0.025) {
       const reasons = ['Switched tabs or minimized the window', 'Exited full screen', 'Clicked or switched outside the assignment window'];
+      writeMain_(row, w);
       lockWork_(row, w, reasons[Math.floor(Math.random() * reasons.length)], w.sessionId);
       ticked++;
       return;
     }
-    // Grow the essay by a handful of words.
     const fullHtml = essayHtml_(essay, essay.paras.length, 1);
     const fullWords = countWords_(fullHtml);
     const target = Math.min(fullWords, w.words + 6 + Math.floor(Math.random() * 14));
@@ -1359,10 +1875,9 @@ function tDemoTick(p) {
         writeMain_(row, w);
         logEvent_(a.id, s.id, 'submit', 'Submitted (' + w.words + ' words)');
         ticked++;
-      }
+      } else writeMain_(row, w);
       return;
     }
-    // Find the paragraph/fraction that gives ~target words.
     let html = '<h1>' + essay.title + '</h1>';
     let remaining = target - countWords_(html);
     for (let i = 0; i < essay.paras.length && remaining > 0; i++) {

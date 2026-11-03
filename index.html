@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=1">
+  <link rel="stylesheet" href="css/style.css?v=2">
 </head>
 <body>
 
@@ -39,20 +39,27 @@
     </header>
     <main class="wrap">
       <h1 class="page-title" id="hello">Your assignments</h1>
-      <p class="page-sub">Assignments open during your class time. Your work saves automatically.</p>
+      <p class="page-sub">Assignments open during your class time. Your work saves automatically, and you can always look back at what you wrote.</p>
+      <div class="banner" id="absent-banner" hidden><span>Your teacher marked you <b>absent</b> today, so writing is closed until your next class. You can still look at your work.</span></div>
       <div class="assign-list" id="assign-list"></div>
     </main>
   </section>
 
-  <!-- Read-only view (submitted or closed) -->
+  <!-- Read-only view -->
   <section id="view-read" hidden>
     <header class="topbar">
-      <button class="btn sm" id="read-back">← Back to assignments</button>
-      <div class="muted small" id="read-meta"></div>
+      <button class="btn sm" id="read-back"><span data-icon="chevL"></span><span>Back to assignments</span></button>
+      <div class="row" style="gap:10px">
+        <span class="pill plain" id="read-badge">Read-only</span>
+        <span class="muted small" id="read-meta"></span>
+      </div>
     </header>
-    <div class="readonly-wrap">
-      <h1 class="page-title" id="read-title" style="margin: 10px 0 18px"></h1>
-      <div class="page"><div class="doc" id="read-doc"></div></div>
+    <div class="read-wrap">
+      <div class="read-main">
+        <h1 class="page-title" id="read-title"></h1>
+        <div class="page"><div class="doc" id="read-doc"></div></div>
+      </div>
+      <aside class="read-side" id="read-side"></aside>
     </div>
   </section>
 
@@ -60,20 +67,20 @@
   <section id="view-write" hidden>
     <div class="w-top">
       <div class="w-title"><span data-icon="mark"></span><span id="w-title"></span></div>
-      <div class="w-timer off" id="w-timer"><span data-icon="clock" style="display:inline-flex;width:16px"></span><span id="w-timer-text"></span></div>
+      <div class="w-timer off" id="w-timer"><span data-icon="clock"></span><span id="w-timer-text"></span></div>
       <div class="w-actions">
         <span class="savestate" id="savestate"><span class="dot"></span><span id="savestate-text">Saved</span></span>
-        <button class="btn sm" id="exit-btn" title="Save and leave this assignment"><span data-icon="door"></span>Save &amp; exit</button>
-        <button class="btn sm primary" id="submit-btn"><span data-icon="send"></span>Submit</button>
+        <button class="btn sm" id="exit-btn" title="Save and leave this assignment"><span data-icon="door"></span><span>Save &amp; exit</span></button>
+        <button class="btn sm primary" id="submit-btn"><span data-icon="send"></span><span>Submit</span></button>
       </div>
     </div>
     <div class="w-body" id="w-body">
       <aside class="w-side">
-        <div id="prompt-wrap">
-          <h4>Prompt</h4>
+        <section id="prompt-wrap" class="side-sec">
+          <div class="side-h"><h4>Prompt</h4><button class="btn xs" id="prompt-read" hidden title="Read the prompt aloud"><span data-icon="speaker"></span><span>Listen</span></button></div>
           <div class="prompt-box"><div class="doc" id="w-prompt"></div></div>
-        </div>
-        <div>
+        </section>
+        <section class="side-sec">
           <h4>Progress</h4>
           <div class="stats">
             <div class="stat"><b id="st-words">0</b><span>words</span></div>
@@ -84,20 +91,39 @@
             <div class="goal-text" id="goal-text"></div>
           </div>
           <div class="goal-text" id="st-chars-ns"></div>
-        </div>
-        <div>
-          <h4>Reminders</h4>
-          <ul class="rules-mini" style="padding-left:18px;margin:0">
-            <li>Stay in this window — leaving it locks the assignment.</li>
-            <li>Pasting from outside is turned off.</li>
-            <li>Press <b>Tab</b> to indent a paragraph.</li>
-            <li>Right-click a misspelled word for suggestions.</li>
-          </ul>
-        </div>
+          <button class="spell-sum" id="spell-sum" hidden></button>
+        </section>
+        <section class="side-sec" id="cmt-sec" hidden>
+          <div class="side-h"><h4>Teacher comments <span class="count-badge" id="cmt-count"></span></h4><label class="tiny-check"><input type="checkbox" id="cmt-show-done"> Show done</label></div>
+          <div id="cmt-list" class="cmt-list"></div>
+        </section>
+        <section class="side-sec" id="lookup-sec" hidden>
+          <h4>Dictionary &amp; thesaurus</h4>
+          <div id="lookup-host"></div>
+        </section>
+        <section class="side-sec">
+          <details class="reminders">
+            <summary><h4>Reminders</h4></summary>
+            <ul class="rules-mini">
+              <li>Stay in this window — leaving it locks the assignment.</li>
+              <li>Pasting from outside is turned off.</li>
+              <li>Press <b>Tab</b> to indent a paragraph.</li>
+              <li id="rem-spell">Click a word with a red squiggle for spelling suggestions.</li>
+              <li id="rem-lookup">Right-click any word to look it up.</li>
+            </ul>
+          </details>
+        </section>
       </aside>
       <div class="w-main">
         <div id="editor-host" style="display:contents"></div>
       </div>
+    </div>
+    <div class="dictate-bubble" id="dictate-bubble" hidden><span class="rec-dot"></span><span id="dictate-text">Listening…</span><button class="btn xs" id="dictate-stop"><span data-icon="stop"></span><span>Stop</span></button></div>
+    <div class="tts-bar" id="tts-bar" hidden>
+      <span data-icon="speaker"></span><span class="small" id="tts-label">Reading aloud</span>
+      <select class="input xs" id="tts-rate" aria-label="Reading speed"><option value="0.75">Slow</option><option value="1">Normal</option><option value="1.25">Fast</option><option value="1.5">Faster</option></select>
+      <button class="btn xs icon-only" id="tts-pause" title="Pause" aria-label="Pause"></button>
+      <button class="btn xs icon-only" id="tts-stop" title="Stop" aria-label="Stop"><span data-icon="stop"></span></button>
     </div>
   </section>
 
@@ -113,6 +139,11 @@
         <li><b>Your work saves automatically</b> every few seconds.</li>
         <li>Don't press <b>Esc</b> — it exits full screen.</li>
       </ul>
+      <div class="mic-check" id="mic-check" hidden>
+        <span data-icon="mic"></span>
+        <span class="small">You can use <b>speech-to-text</b>. Allow the microphone now so it doesn't interrupt you later.</span>
+        <button class="btn sm" id="mic-test"><span>Allow microphone</span></button>
+      </div>
       <div class="row" style="justify-content:center">
         <button class="btn" id="start-cancel">Not yet</button>
         <button class="btn primary lg" id="start-go"><span data-icon="expand"></span><span id="start-go-text">Start writing</span></button>
@@ -130,7 +161,7 @@
       <div class="waiting" id="lock-waiting"><span class="spin"></span> Waiting for your teacher…</div>
       <div id="lock-cleared" hidden>
         <p style="color:#bdf0cf;font-weight:600">You've been cleared.</p>
-        <button class="btn primary lg" id="lock-return"><span data-icon="expand"></span>Return to full screen</button>
+        <button class="btn primary lg" id="lock-return"><span data-icon="expand"></span><span>Return to full screen</span></button>
       </div>
       <div style="margin-top:26px"><button class="btn sm ghost" id="lock-leave" style="color:rgba(255,255,255,.7)">Back to assignments</button></div>
     </div>
@@ -142,7 +173,7 @@
       <div class="icon info-icon"><span data-icon="expand"></span></div>
       <h2>Full screen is required</h2>
       <p class="muted">Click below to go back to full screen and keep writing.</p>
-      <button class="btn primary lg" id="fs-go"><span data-icon="expand"></span>Go full screen</button>
+      <button class="btn primary lg" id="fs-go"><span data-icon="expand"></span><span>Go full screen</span></button>
     </div>
   </div>
 
@@ -157,9 +188,14 @@
   </div>
 
   <div id="toasts"></div>
-  <script src="js/config.js?v=1"></script>
-  <script src="js/common.js?v=1"></script>
-  <script src="js/editor.js?v=1"></script>
-  <script src="js/student.js?v=1"></script>
+  <script src="js/config.js?v=2"></script>
+  <script src="js/common.js?v=2"></script>
+  <script src="js/textmodel.js?v=2"></script>
+  <script src="js/editor.js?v=2"></script>
+  <script src="js/spell.js?v=2"></script>
+  <script src="js/lookup.js?v=2"></script>
+  <script src="js/speech.js?v=2"></script>
+  <script src="js/rubric.js?v=2"></script>
+  <script src="js/student.js?v=2"></script>
 </body>
 </html>

@@ -39,12 +39,13 @@
       btn('ul', 'Bulleted list', 'insertUnorderedList') + btn('ol', 'Numbered list', 'insertOrderedList') +
       '<span class="sep"></span>' +
       btn('undo', 'Undo (Ctrl+Z)') + btn('redo', 'Redo (Ctrl+Y)') +
-      (opts.spacing ? '<span class="sep"></span>' + btn('spacing', 'Double spacing', 'spacing') : '');
+      (opts.spacing ? '<span class="sep"></span>' + btn('spacing', 'Double spacing', 'spacing') : '') +
+      '<span class="tb-tools"></span>';
 
     const el = document.createElement('div');
     el.className = 'doc';
     el.contentEditable = 'true';
-    el.spellcheck = true;
+    el.spellcheck = opts.nativeSpell !== false;
     el.setAttribute('role', 'textbox');
     el.setAttribute('aria-multiline', 'true');
     el.setAttribute('data-placeholder', opts.placeholder || 'Start writing…');
@@ -64,6 +65,21 @@
 
     function btn(icon, title, cmd) {
       return '<button type="button" class="tb" tabindex="-1" data-cmd="' + (cmd || icon) + '" title="' + title + '" aria-label="' + title + '">' + I[icon] + '</button>';
+    }
+    const tools = toolbar.querySelector('.tb-tools');
+    // Extra tool buttons (spelling, dictionary, read aloud, dictation) live at the end of the toolbar.
+    function addTool(o) {
+      if (!tools.children.length) { const sp = document.createElement('span'); sp.className = 'sep'; tools.appendChild(sp); }
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tb tool' + (o.label ? ' wide' : '');
+      b.tabIndex = -1;
+      b.title = o.title; b.setAttribute('aria-label', o.title);
+      b.innerHTML = (Ink.icon(o.icon) || '') + (o.label ? '<span>' + o.label + '</span>' : '');
+      b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      b.addEventListener('click', function () { o.onClick(b); });
+      tools.appendChild(b);
+      return b;
     }
 
     const listeners = [];
@@ -235,6 +251,19 @@
         toolbar.style.pointerEvents = on ? '' : 'none';
       },
       onInput: function (f) { listeners.push(f); },
+      addTool: addTool,
+      // Insert text at a range (or the caret) as if typed; used for dictation and spelling fixes.
+      insertAt: function (range, text) {
+        el.focus();
+        const sel = window.getSelection();
+        if (range) { sel.removeAllRanges(); sel.addRange(range); } else ensureFocus();
+        const parts = String(text).split(/\n/);
+        parts.forEach(function (part, i) {
+          if (i > 0) document.execCommand('insertParagraph', false, null);
+          if (part) document.execCommand('insertText', false, part);
+        });
+        refresh();
+      },
       refresh: refresh
     };
   };
